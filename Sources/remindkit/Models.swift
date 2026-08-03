@@ -39,7 +39,6 @@ struct ReminderEntry: Codable {
     let creationDate: Double?
     let completionDate: Double?
     let dueDate: Double?
-    let dueDateText: String?
     let startDate: Double?
     let allDay: Bool
     let timeZone: String?
@@ -74,7 +73,6 @@ struct AlarmLocation: Codable {
 struct SmartListEntry: Codable {
     let uuid: String
     let name: String?
-    let type: String?
     let filterData: String?
     let icon: String?
     let color: String?
@@ -93,7 +91,6 @@ struct ReminderKitRaw: Codable {
 struct SmartListRaw: Codable {
     let name: String?
     let uuid: String?
-    let type: String?
     let sortingStyle: String?
     let filterData: String?
     let icon: String?

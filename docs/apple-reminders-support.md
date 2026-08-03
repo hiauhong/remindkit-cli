@@ -3,17 +3,17 @@
 > 评估 remindkit 对苹果「提醒事项」功能的支持程度。状态标注：
 > ✅ 完整支持 ｜ 🟡 部分/受限 ｜ ❌ 暂不支持
 >
-> 最后更新：2026-08-03（对应层级写支持落地时）
+> 最后更新：2026-08-02（对应 commit `bee1878` 之后的层级写支持）
 
 ## 一、列表层
 
 | 苹果功能 | 状态 | 说明 |
 |---------|------|------|
-| 普通列表 | ✅ | 读（`list`）、建（`add-list`）、改名/图标/颜色（`update-list`）、删（`delete-list --yes`） |
+| 普通列表 | ✅ | 读（`list`）、建（`create-list`）、改名/图标/颜色（`update-list`）、删（`delete-list --yes`） |
 | 列表图标（emoji） | ✅ | 读取 + `update-list --icon` |
 | 列表颜色 | ✅ | 读取 + `update-list --color`（12 色板） |
-| 分组（智能文件夹） | ✅ | **读**完整（`list --groups`、parentUUID 归属）；**写**：`add-group` 建、`add-list --group` 放入、`delete-list` 删（探索确认：分组=REMAccountGroupContext，无 REMGroup 类；苹果文件夹不支持嵌套，单层） |
-| 智能列表 | ✅ | **读**（smartLists 字段）；**写**：`add-smartlist [--color]`；删除可用 `delete-list` |
+| 分组（智能文件夹） | ✅ | **读**完整（`list --groups`、parentUUID 归属）；**写**：`create-group` 建、`create-list --group` 放入、`delete-list` 删（探索确认：分组=REMAccountGroupContext，无 REMGroup 类；苹果文件夹不支持嵌套，单层） |
+| 智能列表 | ✅ | **读**（smartLists 字段）；**写**：`create-smartlist [--color]`；删除可用 `delete-list` |
 | 列表分区（sections） | ✅ | **读**（`[N sections]`）；**写**：`add-section <list> <name>` 建分区；`add --section` / `update --section` 把提醒归入分区（REMMembership 路径） |
 | 列表排序 | 🟡 | 读取保持 display order；**写排序不支持** |
 
@@ -72,7 +72,7 @@
 | 权限诊断 | ✅ | `doctor`（access 状态 + 修复指引） |
 | 只读保护 | ✅ | `REMINDKIT_READ_ONLY=1` 拒绝全部写操作 |
 | 数据导出 | ✅ | `dump`（unified JSON，含全部字段） |
-| 用户画像（本工具特色） | ✅ | `setup`（仅结构）/ `setup --deep`（含内容）逐列表备注 + 可选 `conventions.md` 侧车 |
+| 用户画像（本工具特色） | ✅ | `setup` 约定层 + `note` 列表备注层 |
 | 标签视角 | ✅ | `tags` 命令（标签+计数） |
 | 全库搜索 | ✅ | `search` 标题/备注/标签 |
 | 模糊列表解析 | ✅ | UUID 前缀/精确标题/子串 + `noSuchList` 报错 |
@@ -95,4 +95,4 @@
 
 **读端 ≈ 100%**：苹果提醒事项的字段几乎全部可读（含子任务、位置、重复、时区、智能列表）。
 
-**写端覆盖全层级**：文件夹（`add-group`）→ 列表（`add-list [--group]`）→ 分区（`add-section` + `add/update --section`）→ 任务（`add`/`update`/`complete`）→ 子任务（`add --parent`）的完整层级写链路均已打通；日常使用（增删改查、完成、移动、批量、标签、旗标、紧急、提醒、位置、重复、智能列表创建）完整；缺口集中在低频/系统级功能（图片、模板、协作）和两个工程限制（最近删除、move ID）。
+**写端覆盖全层级**：文件夹（`create-group`）→ 列表（`create-list [--group]`）→ 分区（`add-section` + `add/update --section`）→ 任务（`add`/`update`/`complete`）→ 子任务（`add --parent`）的完整层级写链路均已打通；日常使用（增删改查、完成、移动、批量、标签、旗标、紧急、提醒、位置、重复、智能列表创建）完整；缺口集中在低频/系统级功能（图片、模板、协作）和两个工程限制（最近删除、move ID）。

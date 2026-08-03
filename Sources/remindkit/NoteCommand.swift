@@ -33,67 +33,47 @@ struct Note: ParsableCommand {
             throw ValidationError("note requires --list <name-or-ID> (or --all)")
         }
 
-        // 普通列表/分组 → 智能列表（系统+自定义）逐级匹配：
-        // calendars 无匹配时回退到 smartLists，这样「旗标/今天」等特殊列表也能读写备注。
-        let calMatches = (try? resolveListFilter(data.calendars, listFilter)) ?? []
-        let smartMatches = calMatches.isEmpty ? resolveSmartListFilter(data.smartLists, listFilter) : []
-        let total = calMatches.count + smartMatches.count
-        guard total == 1 else {
-            if total == 0 {
-                fail("noSuchList", "No list matches '\(listFilter)' (searched lists/groups and smart lists)")
-            }
-            let names = (calMatches.map { "\($0.title) \($0.id)" } + smartMatches.map { "\($0.name ?? "") \($0.uuid)" })
-                .joined(separator: ", ")
-            fail("ambiguousList", "List '\(listFilter)' matches \(total) lists: \(names). Use a full UUID to disambiguate.")
+        let matches = resolveListsOrFail(data.calendars, listFilter)
+        guard matches.count == 1 else {
+            let names = matches.map { "\($0.title) \($0.id)" }.joined(separator: ", ")
+            fail("ambiguousList", "List '\(listFilter)' matches \(matches.count) lists: \(names). Use a full UUID to disambiguate.")
         }
-
-        let target: (id: String, title: String) =
-            calMatches.count == 1
-                ? (calMatches[0].id, calMatches[0].title)
-                : (smartMatches[0].uuid, smartMatches[0].name ?? smartMatches[0].type ?? "smartList")
+        let cal = matches[0]
 
         if let text = set {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
-                notes.removeValue(forKey: target.id)
+                notes.removeValue(forKey: cal.id)
             } else {
-                notes[target.id] = trimmed
+                notes[cal.id] = trimmed
             }
             try store.save(notes)
-            print("ok: note \(trimmed.isEmpty ? "cleared" : "set") for '\(target.title)'")
+            print("ok: note \(trimmed.isEmpty ? "cleared" : "set") for '\(cal.title)'")
             return
         }
         if clear {
-            notes.removeValue(forKey: target.id)
+            notes.removeValue(forKey: cal.id)
             try store.save(notes)
-            print("ok: note cleared for '\(target.title)'")
+            print("ok: note cleared for '\(cal.title)'")
             return
         }
 
         // Read mode.
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let payload = NoteResult(id: target.id, title: target.title, note: notes[target.id])
+        let payload = NoteResult(id: cal.id, title: cal.title, note: notes[cal.id])
         print(String(data: try encoder.encode(payload), encoding: .utf8)!)
     }
 
     private func printAllNotes(_ data: EnrichedData, _ notes: [String: String]) throws {
         let titlesById = Dictionary(uniqueKeysWithValues: data.calendars.map { ($0.id, $0.title) })
+        let iconsById = Dictionary(uniqueKeysWithValues: data.calendars.map { ($0.id, $0.icon) })
         var rows: [NoteResult] = []
         // Preserve calendar (tree) order, skipping notes for deleted lists.
-        // 分组（文件夹）备注也输出（isGroup 标识），与 list 树形一致。
-        for cal in data.calendars {
+        for cal in data.calendars where !cal.isGroup {
             if let note = notes[cal.id] {
                 rows.append(NoteResult(id: cal.id, title: cal.title, note: note,
-                                       icon: cal.icon, isGroup: cal.isGroup,
-                                       parentTitle: cal.parentUUID.flatMap { titlesById[$0] }))
-            }
-        }
-        // 智能列表（系统+自定义）备注：isSmartList 标识 + type（custom 或系统类型全名）。
-        for sl in data.smartLists {
-            if let note = notes[sl.uuid] {
-                rows.append(NoteResult(id: sl.uuid, title: sl.name ?? sl.type ?? "smartList",
-                                       note: note, icon: sl.icon, isSmartList: true, smartListType: sl.type))
+                                       icon: cal.icon, parentTitle: cal.parentUUID.flatMap { titlesById[$0] }))
             }
         }
         let encoder = JSONEncoder()
@@ -110,20 +90,13 @@ struct NoteResult: Codable {
     let title: String
     let note: String?
     let icon: String?
-    let isGroup: Bool?
-    let isSmartList: Bool?
-    let smartListType: String?
     let parentTitle: String?
 
-    init(id: String, title: String, note: String?, icon: String? = nil, isGroup: Bool? = nil,
-         isSmartList: Bool? = nil, smartListType: String? = nil, parentTitle: String? = nil) {
+    init(id: String, title: String, note: String?, icon: String? = nil, parentTitle: String? = nil) {
         self.id = id
         self.title = title
         self.note = note
         self.icon = icon
-        self.isGroup = isGroup
-        self.isSmartList = isSmartList
-        self.smartListType = smartListType
         self.parentTitle = parentTitle
     }
 }

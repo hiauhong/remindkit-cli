@@ -30,10 +30,8 @@ int main(int argc, const char *argv[]) {
         // remindd). Commands that don't need the section field (show/search/
         // count/…) pass --no-sections to skip it entirely.
         BOOL includeSections = YES;
-        BOOL listsOnly = NO;
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--no-sections") == 0) includeSections = NO;
-            if (strcmp(argv[i], "--lists-only") == 0) listsOnly = YES;
         }
 
         NSRegularExpression *uuidRegex = [NSRegularExpression regularExpressionWithPattern:
@@ -49,12 +47,9 @@ int main(int argc, const char *argv[]) {
         NSArray *listEntries = fetchLists(store, groups);
         NSSet *sectionedListUUIDs = includeSections ? collectSectionedListUUIDs(listEntries) : nil;
 
-        // 3) Reminder enumeration (skipped in --lists-only mode: `setup`'s
-        // default evaluates from structure alone and never touches contents)
+        // 3) Reminder enumeration
         NSMutableArray *reminderEntries = [NSMutableArray array];
-        if (!listsOnly) {
-            fetchReminders(store, sectionedListUUIDs, reminderEntries);
-        }
+        fetchReminders(store, sectionedListUUIDs, reminderEntries);
 
         // 4) Build output
         NSDictionary *output = @{

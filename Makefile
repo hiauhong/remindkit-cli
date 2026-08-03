@@ -32,7 +32,6 @@ build-cli: $(REMINDKIT_BIN)
 
 test: build
 	bash Scripts/smoke-test.sh
-	bash Scripts/skill-contract-test.sh
 
 clean:
 	rm -f $(REMINDKIT_BIN)

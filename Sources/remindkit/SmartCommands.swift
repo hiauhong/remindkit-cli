@@ -27,12 +27,6 @@ struct Flagged: ParsableCommand {
     @Option(name: .long, help: "Only output these fields (comma-separated): id,title,dueDate,completed,…")
     var fields: String?
 
-    @Flag(name: .long, help: "Include section field (default: auto — on when --list is given)")
-    var sections: Bool = false
-
-    @Flag(name: .long, help: "Skip section lookup (faster; default: auto)")
-    var noSections: Bool = false
-
     func validate() throws {
         if completed && all {
             throw ValidationError("--completed and --all are mutually exclusive")
@@ -51,8 +45,6 @@ struct Flagged: ParsableCommand {
         q.dueBefore = nil
         q.format = format
         q.fields = fields
-        q.sections = sections
-        q.noSections = noSections
         try q.run()
     }
 }
@@ -78,12 +70,6 @@ struct Urgent: ParsableCommand {
     @Option(name: .long, help: "Only output these fields (comma-separated): id,title,dueDate,completed,…")
     var fields: String?
 
-    @Flag(name: .long, help: "Include section field (default: auto — on when --list is given)")
-    var sections: Bool = false
-
-    @Flag(name: .long, help: "Skip section lookup (faster; default: auto)")
-    var noSections: Bool = false
-
     func validate() throws {
         if completed && all {
             throw ValidationError("--completed and --all are mutually exclusive")
@@ -102,8 +88,6 @@ struct Urgent: ParsableCommand {
         q.dueBefore = nil
         q.format = format
         q.fields = fields
-        q.sections = sections
-        q.noSections = noSections
         try q.run()
     }
 }
