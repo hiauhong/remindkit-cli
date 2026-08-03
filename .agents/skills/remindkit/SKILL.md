@@ -52,6 +52,7 @@ allowed-tools:
 - 所有查询命令**默认只返回未完成**；`--completed` 只查已完成；`--all` 查全部（`--completed` 与 `--all` 互斥）。
 - **JSON 日期字段**：`dueDate` 是 epoch（Double），同时输出 `dueDateText`（本地时区 `yyyy-MM-dd HH:mm`，全天提醒为 `00:00`）——判断今天/过期/几天内直接用 `dueDateText`，勿手转 epoch。
 - **分区（section）字段**：查询命令**显式 `--list` 时自动带** `section`（列表结构查询的核心诉求，如「OKR 列表 → 健康/个人成长/财务…」）；无 `--list` 默认不带（性能，section 查询慢）。需要时 `--sections` 强制带 / `--no-sections` 强制跳过。
+- **结构视图 `--tree`**：`query --list X --tree` 直接渲染「分区 → 任务 → 子任务」层级树（含父子缩进）——查列表内部结构用它，别从平铺 JSON 自己拼。
 - **输出格式自动切换**：终端（TTY）默认 `plain`，管道/agent 调用自动 `json`——agent 无需每次带 `--format json`；也可显式 `--format json|plain|count` 覆盖。
 - `count` 无完成态开关，始终显式输出 `{total, incomplete, completed, flagged, urgent, dueToday, overdue}`（默认 json，`--format plain` 给人看）。`count --by-list` 输出 `{total, incomplete, lists:[{id,title,icon,isGroup,parentTitle,total,…}]}`。
 - `--list` 解析顺序：完整 UUID → UUID 前缀（≥8 位）→ 精确标题（大小写不敏感）→ 子串；**匹配不到时报错退出**（见下），重名列表全部匹配并在 stderr 提示。
@@ -111,6 +112,7 @@ remindkit list --format json
 # 3. 读内容推断用途（投影省 token）：
 remindkit count --by-list                                      # 统计视角
 remindkit query --list <完整UUID> --fields title,dueDate --all # 内容视角（必须 UUID）
+remindkit query --list <完整UUID> --tree                      # 结构视图：分区→任务→子任务层级树
 # 4. 写回：
 remindkit note --list <完整UUID> --set "每月账单缴费提醒：电费/水费/房贷/五险一金/燃气费"
 # 5. 复查：
