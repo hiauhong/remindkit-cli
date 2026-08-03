@@ -4,7 +4,7 @@
 
 [English](README.en.md)
 
-remindkit 是一个 macOS 命令行工具，从 Apple Reminders（提醒事项）导出结构化数据，并支持完整的层级写操作（列表 / 分组 / 分区 / 任务 / 子任务）。**面向 AI agent 设计**：统一 JSON 输出、机器可解析的错误契约、内置 agent skill。
+remindkit 是一个 macOS 命令行工具，从 Apple Reminders（提醒事项）导出结构化数据，并支持**全层级读写**——从**列表文件夹 → 列表 → 分区 → 任务 → 子任务**，五层一路打通。**面向 AI agent 设计**：统一 JSON 输出、机器可解析的错误契约、内置 agent skill。
 
 > 🎨 本项目由 **vibe coding**（AI 辅助开发）驱动——功能、测试与文档均在 AI agent 协作下迭代产出。
 
@@ -17,10 +17,25 @@ remindkit 是一个 macOS 命令行工具，从 Apple Reminders（提醒事项�
 > - 所有数据**仅在本机处理**：CLI 不发起任何网络请求，不上传提醒内容（账单/健康/位置等敏感信息始终留在本机）。
 > - 需要授予「提醒事项」访问权限（TCC）；首次运行按系统提示授权即可，权限归属于宿主进程。
 
+## 完整层级：列表文件夹 → 列表 → 分区 → 任务 → 子任务
+
+Apple Reminders 的五级数据层级，remindkit **读、写全部支持**——这正是公共 EventKit API 做不到的部分：
+
+```
+列表文件夹（分组 / group）                  ← add-group
+ └── 列表（list / calendar）                ← add-list --group
+      ├── 分区（section，macOS 26+）        ← add-section
+      └── 任务（task / reminder）           ← add --list / --section
+           └── 子任务（subtask，可嵌套任意深度）← add --parent <id>
+```
+
+- **读**：`dump` / `list --groups` / `list --format json` 全量输出层级关系，字段一一对应：`isGroup` / `parentUUID`（文件夹）、`sections`（分区）、`parentId` / `subtaskIds`（子任务树）
+- **写**：从顶层一路建到叶子——`add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`；`move` 可在任意层级间调整归属
+
 ## 特性
 
 - **结构化 JSON 导出**：列表、分组（文件夹）、分区、子任务、标签、旗标、紧急、智能列表——含公共 EventKit API **拿不到**的字段（见下文矩阵）
-- **完整写路径**：任务（增/改/完成/删除/移动）、列表、分组、分区、智能列表
+- **完整写路径**：列表文件夹 → 列表 → 分区 → 任务 → 子任务，五级全覆盖（增/改/完成/删除/移动），另含智能列表
 - **双源架构**：ReminderKit 私有框架为主数据源，EventKit 公共 API 兜底，每次导出带 `source` 标注
 - **agent 优先**：默认 JSON 输出、统一错误契约（stderr JSON + 退出码）、`--fields` 投影省 token、内置 skill 一键安装
 
@@ -140,11 +155,12 @@ remindkit complete <id>          # 重复提醒完成后自动滚动到下一期
 remindkit delete <id>            # 软删除 → 最近删除（30 天系统清除）
 remindkit move <id> --to 日常
 
-# 层级：分组 → 列表 → 分区 → 任务
-remindkit add-group "工作"
-remindkit add-list "项目A" --group "工作"
-remindkit add-section "项目A" "待办"
-remindkit add "写周报" --list "项目A" --section "待办"
+# 层级：列表文件夹 → 列表 → 分区 → 任务 → 子任务
+remindkit add-group "工作"                              # ① 列表文件夹（分组）
+remindkit add-list "项目A" --group "工作"                # ② 列表
+remindkit add-section "项目A" "待办"                     # ③ 分区
+remindkit add "写周报" --list "项目A" --section "待办"    # ④ 任务
+remindkit add "整理大纲" --list "项目A" --parent <写周报的ID>   # ⑤ 子任务（可继续嵌套）
 
 # 批量
 remindkit bulk --op complete --list 日常 --due-before 2026-08-02   # 先 --dry-run 预览

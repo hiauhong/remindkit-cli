@@ -4,7 +4,7 @@
 
 [中文版](README.md)
 
-remindkit is a macOS command-line tool that exports structured data from Apple Reminders and supports the full write hierarchy (lists / groups / sections / tasks / subtasks). **Designed for AI agents**: unified JSON output, machine-parseable error contract, and a bundled agent skill.
+remindkit is a macOS command-line tool that exports structured data from Apple Reminders and supports **the full hierarchy, read and write** — list folders → lists → sections → tasks → subtasks, all five levels. **Designed for AI agents**: unified JSON output, machine-parseable error contract, and a bundled agent skill.
 
 > 🎨 This project is **vibe coded** (AI-assisted development) — features, tests, and docs are all iterated in collaboration with an AI agent.
 
@@ -17,10 +17,25 @@ remindkit is a macOS command-line tool that exports structured data from Apple R
 > - All data is processed **locally**: the CLI makes no network requests and uploads nothing (sensitive reminder content — bills, health, locations — never leaves your machine).
 > - Requires “Reminders” access via TCC; grant it from the system prompt on first run. Permission belongs to the host process.
 
+## Full hierarchy: list folder → list → section → task → subtask
+
+All five levels of the Apple Reminders hierarchy, **readable and writable** — exactly what the public EventKit API can't do:
+
+```
+List folder (group)                    ← add-group
+ └── List (calendar)                   ← add-list --group
+      ├── Section (macOS 26+)          ← add-section
+      └── Task (reminder)              ← add --list / --section
+           └── Subtask (nests arbitrarily deep) ← add --parent <id>
+```
+
+- **Read**: `dump` / `list --groups` / `list --format json` output every level; fields map 1:1 — `isGroup` / `parentUUID` (folders), `sections`, `parentId` / `subtaskIds` (subtask tree)
+- **Write**: build top-down — `add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`; `move` re-parents between any levels
+
 ## Features
 
 - **Structured JSON export**: lists, groups (folders), sections, subtasks, tags, flags, urgent, smart lists — including fields the public EventKit API **cannot** provide (matrix below)
-- **Full write hierarchy**: tasks (add/update/complete/delete/move), lists, groups, sections, smart lists
+- **Full write hierarchy**: all five levels — groups, lists, sections, tasks, **subtasks** (add/update/complete/delete/move) + smart lists
 - **Dual-source architecture**: ReminderKit private framework as the primary source, EventKit public API as fallback; every export carries a `source` field
 - **Agent-first**: JSON output by default, unified error contract (stderr JSON + exit codes), `--fields` projection to save tokens, one-command skill install
 
@@ -140,11 +155,12 @@ remindkit complete <id>          # recurring reminders roll to the next occurren
 remindkit delete <id>            # soft delete → Recently Deleted (system purges after 30 days)
 remindkit move <id> --to 日常
 
-# Hierarchy: group → list → section → task
-remindkit add-group "工作"
-remindkit add-list "项目A" --group "工作"
-remindkit add-section "项目A" "待办"
-remindkit add "写周报" --list "项目A" --section "待办"
+# Hierarchy: list folder → list → section → task → subtask
+remindkit add-group "工作"                              # ① folder (group)
+remindkit add-list "项目A" --group "工作"                # ② list
+remindkit add-section "项目A" "待办"                     # ③ section
+remindkit add "写周报" --list "项目A" --section "待办"    # ④ task
+remindkit add "整理大纲" --list "项目A" --parent <写周报的ID>   # ⑤ subtask (nests further)
 
 # Bulk
 remindkit bulk --op complete --list 日常 --due-before 2026-08-02   # preview with --dry-run first
