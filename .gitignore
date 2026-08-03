@@ -1,0 +1,18 @@
+# ObjC compiled binary
+/Binaries/fetch-remindkit
+
+# Build artifacts
+/dist
+
+# Swift build artifacts
+/.build
+.build
+
+# Xcode
+*.xcworkspace
+*.xcodeproj
+.DS_Store
+
+# User-local runtime data (personal conventions / list notes — never commit)
+conventions.md
+notes.json

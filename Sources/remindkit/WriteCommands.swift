@@ -1,0 +1,1308 @@
+import ArgumentParser
+import EventKit
+import EventKitCore
+import Foundation
+
+// MARK: - Shared write plumbing
+
+/// Map a ReminderKit subprocess error message to the read-side business code
+/// where the same condition exists, so agents can handle "list not found"
+/// uniformly across read and write commands.
+func reminderKitErrorCode(for message: String) -> String {
+    if message.hasPrefix("找不到列表") || message.hasPrefix("找不到目标列表") { return "noSuchList" }
+    if message.hasPrefix("找不到提醒") { return "noSuchReminder" }
+    if message.hasPrefix("找不到分组") { return "noSuchGroup" }
+    if message.hasPrefix("找不到账户") { return "noSuchAccount" }
+    if message.hasPrefix("找不到删除记录") { return "noSuchDeletedRecord" }
+    if message.hasPrefix("列表中没有分区") { return "noSuchSection" }
+    return "reminderKitError"
+}
+
+/// Emit the structured error contract (`{"error":{"code":…,"message":…}}` on
+/// stderr, exit 1) for a failed ReminderKit subprocess write response.
+func failReminderKitError(_ rk: [String: Any]) -> Never {
+    let message = rk["error"] as? String ?? "ReminderKit write failed"
+    fail(reminderKitErrorCode(for: message), message)
+}
+
+/// Try the ReminderKit subprocess first; fall back to EventKit ONLY when the
+/// subprocess is unavailable (binary missing / crashed / no output). A
+/// business error from the subprocess (ambiguous name, not found, write
+/// protection) surfaces as the structured error contract — falling back would
+/// silently operate on the wrong list or fail the same way.
+func writeWithReminderKit(_ request: [String: Any],
+                          fallback: () throws -> [String: Any]) throws -> (source: String, result: [String: Any]) {
+    if let rk = runReminderKitWrite(request) {
+        if let ok = rk["ok"] as? Bool, ok {
+            return ("reminderKit", rk)
+        }
+        failReminderKitError(rk)
+    }
+    return ("eventKit", try fallback())
+}
+
+/// Resolve a list by exact name or ID (EventKit fallback side).
+func ekResolveList(_ nameOrID: String, writer: RemindersWriter) throws -> EKCalendar {
+    guard let cal = writer.calendar(namedOrID: nameOrID) else {
+        fail("noSuchList", "找不到列表：\(nameOrID)")
+    }
+    return cal
+}
+
+/// Resolve a reminder by ID (EventKit fallback side).
+private func ekResolveReminder(_ id: String, writer: RemindersWriter) throws -> EKReminder {
+    guard let reminder = writer.reminder(id: id) else {
+        fail("noSuchReminder", "找不到提醒：\(id)")
+    }
+    return reminder
+}
+
+func jsonOut(_ obj: [String: Any]) throws {
+    let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+    print(String(data: data, encoding: .utf8)!)
+}
+
+/// Build the alarms array shared by add/update: absolute-date alarms
+/// (--alarm-at), due-minus-N-minutes (--alarm-before), and location
+/// triggers (--location + lat/lon [+ --proximity]).
+private func buildAlarms(alarmAt: [String], alarmBefore: Int?, location: String?,
+                         latitude: Double?, longitude: Double?, proximity: String?,
+                         dueEpoch: Double?) throws -> [[String: Any]] {
+    var alarms: [[String: Any]] = []
+    for at in alarmAt {
+        if let epoch = try parseDateEpoch(at) {
+            alarms.append(["type": "date", "date": epoch])
+        }
+    }
+    if let alarmBefore {
+        // 提前 N 分钟 = due - N 分钟的绝对时间提醒（绕开 dueDateDelta 写限制）
+        if let dueEpoch {
+            alarms.append(["type": "date", "date": dueEpoch - Double(alarmBefore) * 60])
+        } else {
+            throw ValidationError("--alarm-before 需要同时指定 --due")
+        }
+    }
+    if let location, let latitude, let longitude {
+        var al: [String: Any] = [
+            "type": "location", "title": location,
+            "latitude": latitude, "longitude": longitude,
+        ]
+        if let p = proximity?.lowercased() {
+            al["proximity"] = p == "leave" ? 2 : 1
+        }
+        alarms.append(al)
+    }
+    return alarms
+}
+
+private func reminderJSON(_ r: EKReminder) -> [String: Any] {
+    var dict: [String: Any] = [
+        "id": r.calendarItemIdentifier,
+        "title": r.title ?? "",
+        "calendar": r.calendar.title,
+        "calendarId": r.calendar.calendarIdentifier,
+        "completed": r.isCompleted,
+        "priority": r.priority,
+    ]
+    if let notes = r.notes, !notes.isEmpty { dict["notes"] = notes }
+    if let due = r.dueDateComponents?.date { dict["dueDate"] = due.timeIntervalSince1970 }
+    if let start = r.startDateComponents?.date { dict["startDate"] = start.timeIntervalSince1970 }
+    if let comp = r.completionDate { dict["completionDate"] = comp.timeIntervalSince1970 }
+    if let rules = r.recurrenceRules, !rules.isEmpty {
+        dict["recurrenceRules"] = String(data: try! JSONSerialization.data(withJSONObject: rules.map { EKRecurrenceRuleJSON($0) }, options: []), encoding: .utf8)!
+    }
+    return dict
+}
+
+private func EKRecurrenceRuleJSON(_ rule: EKRecurrenceRule) -> [String: Any] {
+    var dict: [String: Any] = [
+        "frequency": rule.frequency.rawValue,
+        "interval": rule.interval,
+    ]
+    if let days = rule.daysOfTheWeek {
+        dict["daysOfTheWeek"] = days.map { ["dayOfTheWeek": $0.dayOfTheWeek.rawValue, "weekNumber": $0.weekNumber] }
+    }
+    if let dom = rule.daysOfTheMonth { dict["daysOfTheMonth"] = dom.map { $0.intValue } }
+    if let moy = rule.monthsOfTheYear { dict["monthsOfTheYear"] = moy.map { $0.intValue } }
+    if let woy = rule.weeksOfTheYear { dict["weeksOfTheYear"] = woy.map { $0.intValue } }
+    if let doy = rule.daysOfTheYear { dict["daysOfTheYear"] = doy.map { $0.intValue } }
+    if let pos = rule.setPositions { dict["setPositions"] = pos.map { $0.intValue } }
+    if rule.firstDayOfTheWeek != 0 { dict["firstDayOfTheWeek"] = rule.firstDayOfTheWeek }
+    if let end = rule.recurrenceEnd {
+        var endDict: [String: Any] = [:]
+        if let endDate = end.endDate { endDict["endDate"] = endDate.timeIntervalSince1970 }
+        if end.occurrenceCount > 0 { endDict["occurrenceCount"] = end.occurrenceCount }
+        dict["recurrenceEnd"] = endDict
+    }
+    return dict
+}
+
+private func parseDateEpoch(_ value: String?) throws -> Double? {
+    guard let value else { return nil }
+    guard let date = parseDueDate(value) else {
+        throw ValidationError("无效日期：\(value)。使用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
+    }
+    return date.timeIntervalSince1970
+}
+
+private func parseDateOption(_ value: String?, allowTime: Bool = true) throws -> DateComponents? {
+    guard let value else { return nil }
+    guard let date = parseDueDate(value) else {
+        throw ValidationError("无效日期：\(value)。使用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
+    }
+    if allowTime {
+        return Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+    }
+    return Calendar.current.dateComponents([.year, .month, .day], from: date)
+}
+
+private let dayMap: [String: Int] = [
+    "sun": 1, "mon": 2, "tue": 3, "wed": 4,
+    "thu": 5, "fri": 6, "sat": 7,
+]
+
+private func parsePriority(_ value: String?) throws -> Int {
+    guard let value else { return 0 }
+    switch value.lowercased() {
+    case "high", "h": return 9
+    case "medium", "med", "m": return 5
+    case "low", "l": return 1
+    case "none", "0": return 0
+    default:
+        if let n = Int(value), (0...9).contains(n) { return n }
+        throw ValidationError("无效优先级：\(value)。使用 high / medium / low 或 0-9")
+    }
+}
+
+private let freqMap: [String: Int] = [
+    "hourly": 4, "hour": 4,
+    "daily": 0, "day": 0, "weekly": 1, "week": 1,
+    "weekdays": 1, "weekends": 1,
+    "monthly": 2, "month": 2, "yearly": 3, "year": 3,
+]
+
+private let presetDays: [String: [Int]] = [
+    "weekdays": [2, 3, 4, 5, 6],   // 周一~周五
+    "weekends": [7, 1],             // 周六、周日
+]
+
+private func parseRecurrenceDict(repeat: String?, every: Int, days: String?, until: String?,
+                                  onDay: Int?, lastWorkday: Bool, months: String?,
+                                  onWeekday: String?) throws -> [String: Any]? {
+    guard let repeatValue = `repeat`?.lowercased() else { return nil }
+    guard let freq = freqMap[repeatValue] else {
+        throw ValidationError("无效重复：\(repeatValue)。使用 daily / weekly / monthly / yearly")
+    }
+    var dict: [String: Any] = ["frequency": freq, "interval": max(1, every)]
+    if let preset = presetDays[repeatValue] {
+        dict["days"] = preset
+    }
+    if let days {
+        let names = days.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        var dow: [Int] = []
+        for name in names {
+            guard let d = dayMap[name] else {
+                throw ValidationError("无效星期：\(name)。使用 mon,tue,wed,thu,fri,sat,sun")
+            }
+            dow.append(d)
+        }
+        if !dow.isEmpty { dict["days"] = dow }
+    }
+    if let onDay {
+        guard (1...31).contains(onDay) else {
+            throw ValidationError("--on-day 范围 1-31")
+        }
+        dict["daysOfTheMonth"] = [onDay]
+    }
+    if lastWorkday {
+        // 每月最后一个工作日 = 周一~周五 + setPositions[-1]
+        dict["days"] = [2, 3, 4, 5, 6]
+        dict["setPositions"] = [-1]
+    }
+    if let months {
+        let nums = months.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard !nums.isEmpty, nums.allSatisfy({ (1...12).contains($0) }) else {
+            throw ValidationError("--months 格式：3,8（1-12 月）")
+        }
+        dict["monthsOfTheYear"] = nums
+    }
+    if let onWeekday {
+        // 格式："sun:1" = 第 1 个周日；"mon" = 每周一（weekNumber 0）
+        let parts = onWeekday.split(separator: ":")
+        guard let name = parts.first.map({ String($0).lowercased() }), let day = dayMap[name] else {
+            throw ValidationError("--on-weekday 格式：sun:1（第1个周日）或 mon（每周一）")
+        }
+        let week = parts.count > 1 ? Int(parts[1]) ?? 0 : 0
+        dict["days"] = [["day": day, "week": week]]
+    }
+    if let until {
+        guard let date = parseDueDate(until) else {
+            throw ValidationError("无效结束日期：\(until)。使用 YYYY-MM-DD")
+        }
+        dict["until"] = date.timeIntervalSince1970
+    }
+    return dict
+}
+
+// MARK: - add
+
+struct Add: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add",
+        abstract: "Create a reminder in a test list (ReminderKit write, EventKit fallback)"
+    )
+
+    @Argument(help: "Reminder title")
+    var title: String
+
+    @Option(name: .long, help: "Target list name or ID")
+    var list: String?
+
+    @Option(name: .long, help: "Target list ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
+    @Option(name: .long, help: "Notes")
+    var notes: String?
+
+    @Option(name: .long, help: "Due date: YYYY-MM-DD (all-day) or YYYY-MM-DD HH:MM")
+    var due: String?
+
+    @Option(name: .long, help: "Start date: YYYY-MM-DD or YYYY-MM-DD HH:MM")
+    var start: String?
+
+    @Option(name: .long, help: "Priority: high / medium / low / none")
+    var priority: String?
+
+    @Option(name: .customLong("repeat"), help: "Repeat: daily / weekly / monthly / yearly")
+    var repeatRule: String?
+
+    @Option(name: .long, help: "Repeat interval (every N units)")
+    var every: Int = 1
+
+    @Option(name: .long, help: "Days of week for weekly repeat: mon,tue,wed,thu,fri,sat,sun")
+    var days: String?
+
+    @Option(name: .long, help: "Repeat end date: YYYY-MM-DD")
+    var until: String?
+
+    @Option(name: .long, help: "Repeat on day of month 1-31 (with --repeat monthly)")
+    var onDay: Int?
+
+    @Flag(name: .long, help: "Monthly on the last workday (with --repeat monthly)")
+    var lastWorkday: Bool = false
+
+    @Option(name: .long, help: "Repeat in months 1-12, comma-separated (with --repeat yearly)")
+    var months: String?
+
+    @Option(name: .long, help: "Repeat on a weekday: 'sun:1' = 1st Sunday, 'mon' = every Monday")
+    var onWeekday: String?
+
+    /// Compute the next occurrence date for a recurrence rule, mirroring how
+    /// Reminders.app anchors repetition to a due date. Used when --repeat is
+    /// given without --due (a repeating reminder needs a due date to display).
+    func nextDueDate(repeat: String?, every: Int, days: String?, onDay: Int?,
+                     lastWorkday: Bool, months: String?, onWeekday: String?) -> Date? {
+        guard let repeatValue = `repeat`?.lowercased() else { return nil }
+        let today = Calendar.current.startOfDay(for: Date())
+        let cal = Calendar.current
+        switch repeatValue {
+        case "hourly", "hour":
+            return cal.date(byAdding: .hour, value: max(1, every), to: Date())
+        case "daily", "day":
+            return cal.date(byAdding: .day, value: max(1, every), to: today)
+        case "weekly", "week", "weekdays", "weekends":
+            var wanted: [Int] = []
+            if let days {
+                let names = days.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                wanted = names.compactMap { dayMap[$0] }
+            }
+            if let preset = presetDays[repeatValue] { wanted = preset }
+            if !wanted.isEmpty {
+                for offset in 1...14 {
+                    if let d = cal.date(byAdding: .day, value: offset, to: today) {
+                        let wd = cal.component(.weekday, from: d)
+                        if wanted.contains(wd) { return d }
+                    }
+                }
+            }
+            return cal.date(byAdding: .day, value: 7 * max(1, every), to: today)
+        case "monthly", "month":
+            if lastWorkday {
+                // next month's last workday (Mon–Fri)
+                var comp = cal.dateComponents([.year, .month], from: today)
+                comp.month = (comp.month ?? 1) + 1
+                guard let firstOfNext = cal.date(from: comp),
+                      let range = cal.range(of: .day, in: .month, for: firstOfNext) else { return nil }
+                let lastDay = range.count
+                for day in stride(from: lastDay, through: 1, by: -1) {
+                    if let d = cal.date(byAdding: .day, value: day - 1, to: firstOfNext) {
+                        let wd = cal.component(.weekday, from: d)
+                        if (2...6).contains(wd) { return d }
+                    }
+                }
+                return nil
+            }
+            let targetDay = onDay ?? cal.component(.day, from: today)
+            var comp = cal.dateComponents([.year, .month], from: today)
+            comp.day = targetDay
+            if let thisMonth = cal.date(from: comp), thisMonth >= today {
+                return thisMonth
+            }
+            comp.month = (comp.month ?? 1) + 1
+            return cal.date(from: comp)
+        case "yearly", "year":
+            if let months, let onWeekday {
+                let monthNums = months.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                let parts = onWeekday.split(separator: ":")
+                guard let name = parts.first.map({ String($0).lowercased() }),
+                      let dayNum = dayMap[name] else { return nil }
+                let weekNum = parts.count > 1 ? (Int(parts[1]) ?? 1) : 1
+                for year in (cal.component(.year, from: today))...(cal.component(.year, from: today) + 2) {
+                    for month in monthNums {
+                        guard let first = cal.date(from: DateComponents(year: year, month: month, day: 1)),
+                              let range = cal.range(of: .day, in: .month, for: first) else { continue }
+                        var count = 0
+                        for day in 1...range.count {
+                            if let d = cal.date(from: DateComponents(year: year, month: month, day: day)) {
+                                if cal.component(.weekday, from: d) == dayNum {
+                                    count += 1
+                                    if count == weekNum {
+                                        if d >= today { return d }
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return nil
+            }
+            // yearly without options: same month/day next year (or this year if later)
+            var comp = cal.dateComponents([.month, .day], from: today)
+            comp.year = cal.component(.year, from: today)
+            if let thisYear = cal.date(from: comp), thisYear >= today {
+                return thisYear
+            }
+            comp.year = (comp.year ?? 0) + 1
+            return cal.date(from: comp)
+        default:
+            return nil
+        }
+    }
+
+    @Option(name: .long, help: "Tag (repeatable)")
+    var tag: [String] = []
+
+    @Flag(name: .long, help: "Mark as urgent")
+    var urgent: Bool = false
+
+    @Flag(name: .long, help: "Mark as flagged")
+    var flagged: Bool = false
+
+    @Option(name: .long, help: "Parent reminder ID (creates a subtask)")
+    var parent: String?
+
+    @Option(name: .long, help: "Section to file the reminder into (must exist in the list; use add-section first)")
+    var section: String?
+
+    @Option(name: .long, help: "URL (https://…)")
+    var url: String?
+
+    @Option(name: .long, help: "Absolute-time alarm: YYYY-MM-DD HH:MM (repeatable)")
+    var alarmAt: [String] = []
+
+    @Option(name: .long, help: "Alarm N minutes before the due date (falls back to an absolute-time alarm)")
+    var alarmBefore: Int?
+
+    @Option(name: .long, help: "Location reminder: place name")
+    var location: String?
+
+    @Option(name: .long, help: "Latitude for the location reminder")
+    var latitude: Double?
+
+    @Option(name: .long, help: "Longitude for the location reminder")
+    var longitude: Double?
+
+    @Option(name: .long, help: "Proximity: arrive (default) or leave")
+    var proximity: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        var effectiveDue = due
+        if repeatRule != nil && effectiveDue == nil {
+            if let next = nextDueDate(repeat: repeatRule, every: every, days: days,
+                                      onDay: onDay, lastWorkday: lastWorkday,
+                                      months: months, onWeekday: onWeekday) {
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US_POSIX")
+                let isHourly = (repeatRule?.lowercased() == "hourly" || repeatRule?.lowercased() == "hour")
+                f.dateFormat = isHourly ? "yyyy-MM-dd HH:mm" : "yyyy-MM-dd"
+                effectiveDue = f.string(from: next)
+            }
+        }
+        let dueEpoch = try parseDateEpoch(effectiveDue)
+        let startEpoch = try parseDateEpoch(start)
+        let priorityInt = try parsePriority(priority)
+        let recurrence = try parseRecurrenceDict(repeat: repeatRule, every: every, days: days, until: until,
+                                                 onDay: onDay, lastWorkday: lastWorkday, months: months,
+                                                 onWeekday: onWeekday)
+
+        guard list != nil || listId != nil else {
+            throw ValidationError("需要指定目标列表：--list 或 --list-id")
+        }
+        var request: [String: Any] = [
+            "op": "add",
+            "title": title,
+            "author": "remindkit",
+        ]
+        if let list { request["listName"] = list }
+        if let listId { request["listID"] = listId }
+        if let notes, !notes.isEmpty { request["notes"] = notes }
+        if let dueEpoch { request["due"] = dueEpoch }
+        if let startEpoch { request["start"] = startEpoch }
+        if priorityInt != 0 { request["priority"] = priorityInt }
+        if urgent { request["urgent"] = true }
+        if flagged { request["flagged"] = true }
+        if !tag.isEmpty { request["tags"] = tag }
+        if let parent, !parent.isEmpty { request["parentId"] = parent }
+        if let section, !section.isEmpty { request["section"] = section }
+        if let recurrence { request["recurrence"] = recurrence }
+        if let url, !url.isEmpty { request["url"] = url }
+
+        var alarms = try buildAlarms(alarmAt: alarmAt, alarmBefore: alarmBefore, location: location,
+                                     latitude: latitude, longitude: longitude, proximity: proximity,
+                                     dueEpoch: dueEpoch)
+        if !alarms.isEmpty { request["alarms"] = alarms }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            // EventKit fallback: core fields only (tags/urgent/subtask are
+            // not writable via EventKit → degrade with a warning).
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            let calendar: EKCalendar
+            if let listId {
+                guard let cal = writer.calendar(namedOrID: listId) else {
+                    fail("noSuchList", "找不到目标列表：\(listId)")
+                }
+                calendar = cal
+            } else {
+                calendar = try ekResolveList(list ?? "", writer: writer)
+            }
+
+            let hasTime = effectiveDue?.contains(":") == true
+            let ekReminder = try writer.add(
+                title: title,
+                to: calendar,
+                notes: notes,
+                due: try parseDateOption(effectiveDue, allowTime: hasTime),
+                start: try parseDateOption(start),
+                priority: priorityInt,
+                recurrence: try parseRecurrenceRule(repeat: repeatRule, every: every, days: days, until: until)
+            )
+            var degraded = false
+            if urgent || flagged || !tag.isEmpty || parent != nil || section != nil { degraded = true }
+            var dict = reminderJSON(ekReminder)
+            if degraded { dict["degraded"] = true }
+            return dict
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+
+    private func parseRecurrenceRule(repeat: String?, every: Int, days: String?, until: String?) throws -> EKRecurrenceRule? {
+        guard let repeatValue = `repeat`?.lowercased() else { return nil }
+        let freq: EKRecurrenceFrequency
+        switch repeatValue {
+        case "daily", "day": freq = .daily
+        case "weekly", "week": freq = .weekly
+        case "monthly", "month": freq = .monthly
+        case "yearly", "year": freq = .yearly
+        default: throw ValidationError("无效重复：\(repeatValue)。使用 daily / weekly / monthly / yearly")
+        }
+        var daysOfWeek: [EKRecurrenceDayOfWeek]? = nil
+        if let days {
+            daysOfWeek = try days.split(separator: ",").map { name in
+                let n = name.trimmingCharacters(in: .whitespaces).lowercased()
+                guard let d = dayMap[n], let weekday = EKWeekday(rawValue: d) else {
+                    throw ValidationError("无效星期：\(name).trimmingCharacters(in: .whitespaces)。使用 mon,tue,wed,thu,fri,sat,sun")
+                }
+                return EKRecurrenceDayOfWeek(dayOfTheWeek: weekday, weekNumber: 0)
+            }
+        }
+        let end: EKRecurrenceEnd? = try {
+            guard let until else { return nil }
+            guard let date = parseDueDate(until) else {
+                throw ValidationError("无效结束日期：\(until)。使用 YYYY-MM-DD")
+            }
+            return EKRecurrenceEnd(end: date)
+        }()
+        return EKRecurrenceRule(
+            recurrenceWith: freq,
+            interval: max(1, every),
+            daysOfTheWeek: daysOfWeek,
+            daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil,
+            daysOfTheYear: nil, setPositions: nil, end: end
+        )
+    }
+}
+
+// MARK: - complete / reopen
+
+struct Complete: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "complete",
+        abstract: "Mark a reminder as completed (ReminderKit write, EventKit fallback)"
+    )
+
+    @Argument(help: "Reminder ID")
+    var id: String
+
+    @Flag(name: .long, help: "Un-complete instead (reopen)")
+    var reopen: Bool = false
+
+    func run() throws {
+        guardWriteEnabled()
+        let completed = !reopen
+        let request: [String: Any] = ["op": "complete", "id": id, "completed": completed, "author": "remindkit"]
+
+        let (source, result) = try writeWithReminderKit(request) {
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            let reminder = try ekResolveReminder(id, writer: writer)
+            try writer.setCompleted(reminder, completed: completed)
+            return ["id": id, "completed": completed, "completionDate": reminder.completionDate?.timeIntervalSince1970 ?? 0]
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+
+        // 重复提醒：完成后 remindd 会自动把同一 ID 滚动到下一期（dueDate 变未来、仍未完成）。
+        // 显式提示 agent，避免把「已完成」误判为永久完成（如每月充值、每周 gtd）。
+        if completed, let next = nextOccurrenceAfterComplete(id: id) {
+            out["nextOccurrence"] = next.epoch
+            out["nextOccurrenceText"] = next.text
+        }
+        try jsonOut(out)
+    }
+}
+
+/// 完成操作后重新查询该提醒：若同一 ID 仍未完成且带未来 dueDate，
+/// 说明重复规则已滚动到下一期，返回下一期日期（epoch + 可读文本）。
+private func nextOccurrenceAfterComplete(id: String) -> (epoch: Double, text: String)? {
+    let data = fetchEnrichedData()
+    guard let r = data.reminders.first(where: { $0.id == id }) else { return nil }
+    guard !r.completed, let due = r.dueDate else { return nil }
+    return (due, reminderDateText(due) ?? "")
+}
+
+// MARK: - Recently-deleted cache
+
+/// Local record of reminders deleted through remindkit. ReminderKit cannot
+/// enumerate marked-for-delete objects, so we keep the IDs we deleted and
+/// verify their status on demand via `fetchReminderIncludingMarkedForDelete`.
+struct DeletedRecord: Codable {
+    let id: String
+    let title: String
+    let listName: String
+    let deletedAt: Double
+}
+
+private func deletedCacheURL() -> URL {
+    // Override with REMINDKIT_DELETED_CACHE (e.g. a temp file in tests) so
+    // the smoke test never touches the user's real recently-deleted cache.
+    if let env = ProcessInfo.processInfo.environment["REMINDKIT_DELETED_CACHE"],
+       !env.isEmpty {
+        return URL(fileURLWithPath: env)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/share/remindkit/deleted.json")
+}
+
+private func loadDeletedCache() -> [DeletedRecord] {
+    let url = deletedCacheURL()
+    guard let data = try? Data(contentsOf: url),
+          let records = try? JSONDecoder().decode([DeletedRecord].self, from: data) else {
+        return []
+    }
+    return records
+}
+
+private func saveDeletedCache(_ records: [DeletedRecord]) {
+    let url = deletedCacheURL()
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if let data = try? JSONEncoder().encode(records) {
+        try? data.write(to: url)
+    }
+}
+
+private func appendDeletedRecord(_ record: DeletedRecord) {
+    var records = loadDeletedCache()
+    records.removeAll { $0.id == record.id }
+    records.append(record)
+    saveDeletedCache(records)
+}
+
+private func removeDeletedRecord(id: String) {
+    var records = loadDeletedCache()
+    records.removeAll { $0.id == id }
+    saveDeletedCache(records)
+}
+
+// MARK: - recently-deleted
+
+struct RecentlyDeleted: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "recently-deleted",
+        abstract: "List reminders deleted via remindkit that are still in Recently Deleted"
+    )
+
+    func run() throws {
+        let records = loadDeletedCache()
+        guard !records.isEmpty else {
+            try jsonOut(["count": 0, "items": []])
+            return
+        }
+
+        // Verify which are still marked-for-delete via the subprocess.
+        let request: [String: Any] = ["op": "deleted", "ids": records.map { $0.id }, "author": "remindkit"]
+        var stillDeleted: [String: Any] = [:]
+        if let rk = runReminderKitWrite(request),
+           let ok = rk["ok"] as? Bool, ok,
+           let deleted = rk["deleted"] as? [[String: Any]] {
+            for d in deleted {
+                if let id = d["id"] as? String {
+                    stillDeleted[id] = d
+                }
+            }
+        }
+
+        let out: [[String: Any]] = records.compactMap { record in
+            guard stillDeleted[record.id] != nil else { return nil } // restored or purged
+            return [
+                "id": record.id,
+                "title": record.title,
+                "listName": record.listName,
+                "deletedAt": record.deletedAt,
+            ]
+        }
+        try jsonOut(["count": out.count, "items": out])
+    }
+}
+
+// MARK: - restore
+
+struct Restore: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "restore",
+        abstract: "Restore a reminder from Recently Deleted to its original test list"
+    )
+
+    @Argument(help: "Reminder ID (from recently-deleted)")
+    var id: String
+
+    @Option(name: .long, help: "Target list name (default: the list it was deleted from)")
+    var list: String?
+
+    @Option(name: .long, help: "Target list ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        let record = loadDeletedCache().first { $0.id == id }
+        guard let record else {
+            fail("noSuchDeletedRecord", "找不到删除记录：\(id)。用 recently-deleted 查看可恢复的提醒。")
+        }
+        let targetList = list ?? record.listName
+
+        var request: [String: Any] = ["op": "restore", "id": id, "listName": targetList, "author": "remindkit"]
+        if let listId { request["listID"] = listId }
+        guard let rk = runReminderKitWrite(request) else {
+            fail("reminderKitError", "ReminderKit 子进程不可用，无法恢复（恢复只支持 ReminderKit 路径）。")
+        }
+        if let ok = rk["ok"] as? Bool, ok {
+            removeDeletedRecord(id: id)
+            var out: [String: Any] = ["ok": true, "source": "reminderKit"]
+            for (k, v) in rk where k != "ok" { out[k] = v }
+            try jsonOut(out)
+        } else {
+            failReminderKitError(rk)
+        }
+    }
+}
+
+// MARK: - delete
+
+struct Delete: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Permanently delete a reminder (ReminderKit write, EventKit fallback)"
+    )
+
+    @Argument(help: "Reminder ID")
+    var id: String
+
+    func run() throws {
+        guardWriteEnabled()
+        let request: [String: Any] = ["op": "delete", "id": id, "author": "remindkit"]
+
+        let (source, result) = try writeWithReminderKit(request) {
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            let reminder = try ekResolveReminder(id, writer: writer)
+            let title = reminder.title ?? ""
+            let listName = reminder.calendar.title
+            try writer.delete(reminder)
+            return ["id": id, "deleted": true, "title": title, "listName": listName]
+        }
+
+        // Record in the recently-deleted cache (both paths are soft deletes).
+        if let title = result["title"] as? String,
+           let listName = result["listName"] as? String {
+            appendDeletedRecord(DeletedRecord(
+                id: id, title: title, listName: listName,
+                deletedAt: Date().timeIntervalSince1970
+            ))
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - update (flagged/urgent on existing reminders)
+
+struct Update: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Update an existing reminder: fields (title/notes/due/priority/tags/url/repeat) and flags (flag/urgent)"
+    )
+
+    @Argument(help: "Reminder ID")
+    var id: String
+
+    @Option(name: .long, help: "New title")
+    var title: String?
+
+    @Option(name: .long, help: "New notes")
+    var notes: String?
+
+    @Option(name: .long, help: "New due date (YYYY-MM-DD all-day | YYYY-MM-DD HH:MM)")
+    var due: String?
+
+    @Option(name: .long, help: "New start date")
+    var start: String?
+
+    @Option(name: .long, help: "New priority: high|medium|low")
+    var priority: String?
+
+    @Option(name: .long, help: "Set tags (repeatable)")
+    var tag: [String] = []
+
+    @Option(name: .long, help: "New URL")
+    var url: String?
+
+    @Option(name: .customLong("repeat"), help: "Repeat rule: daily|weekly|monthly|yearly")
+    var repeatRule: String?
+
+    @Option(name: .long, help: "Repeat every N units")
+    var every: Int?
+
+    @Option(name: .long, help: "Repeat on days: mon,tue,wed,thu,fri,sat,sun")
+    var days: String?
+
+    @Option(name: .long, help: "Repeat until YYYY-MM-DD")
+    var until: String?
+
+    @Option(name: .long, help: "Set an absolute alarm (YYYY-MM-DD HH:MM, repeatable)")
+    var alarmAt: [String] = []
+
+    @Option(name: .long, help: "Move to a section (must exist in the list; use add-section first)")
+    var section: String?
+
+    @Option(name: .long, help: "Alarm N minutes before the due date (requires --due)")
+    var alarmBefore: Int?
+
+    @Option(name: .long, help: "Location reminder title (requires --latitude/--longitude)")
+    var location: String?
+
+    @Option(name: .long, help: "Latitude for the location reminder")
+    var latitude: Double?
+
+    @Option(name: .long, help: "Longitude for the location reminder")
+    var longitude: Double?
+
+    @Option(name: .long, help: "Proximity for location reminder: arrive (default) or leave")
+    var proximity: String?
+
+    @Flag(name: .long, help: "Set the flag (当前关注的短期任务)")
+    var flag: Bool = false
+
+    @Flag(name: .long, help: "Clear the flag")
+    var noFlag: Bool = false
+
+    @Flag(name: .long, help: "Mark urgent")
+    var urgent: Bool = false
+
+    @Flag(name: .long, help: "Unmark urgent")
+    var noUrgent: Bool = false
+
+    func validate() throws {
+        if flag && noFlag {
+            throw ValidationError("--flag and --no-flag are mutually exclusive")
+        }
+        if urgent && noUrgent {
+            throw ValidationError("--urgent and --no-urgent are mutually exclusive")
+        }
+        if title == nil && notes == nil && due == nil && start == nil && priority == nil
+            && tag.isEmpty && url == nil && repeatRule == nil && until == nil
+            && alarmAt.isEmpty && alarmBefore == nil && location == nil
+            && !flag && !noFlag && !urgent && !noUrgent && section == nil {
+            throw ValidationError("specify at least one field or flag to update")
+        }
+    }
+
+    func run() throws {
+        guardWriteEnabled()
+        var request: [String: Any] = ["op": "update", "id": id, "author": "remindkit"]
+        if let title { request["title"] = title }
+        if let notes { request["notes"] = notes }
+        let dueRequested = try parseDateEpoch(due)
+        if let dueRequested { request["due"] = dueRequested }
+        if let start, let epoch = try parseDateEpoch(start) { request["start"] = epoch }
+        if let priority {
+            let p = try parsePriority(priority)
+            if p != 0 { request["priority"] = p }
+        }
+        if !tag.isEmpty { request["tags"] = tag }
+        if let url, !url.isEmpty { request["url"] = url }
+        if let recurrence = try parseRecurrenceDict(repeat: repeatRule, every: every ?? 1,
+                                                    days: days, until: until, onDay: nil,
+                                                    lastWorkday: false, months: nil, onWeekday: nil) {
+            request["recurrence"] = recurrence
+        }
+        if flag { request["flagged"] = true }
+        if noFlag { request["flagged"] = false }
+        if urgent { request["urgent"] = true }
+        if noUrgent { request["urgent"] = false }
+        if let section, !section.isEmpty { request["section"] = section }
+
+        // --alarm-before 基准：本次显式 --due 优先，否则用提醒当前 dueDate。
+        var alarmDueEpoch = dueRequested
+        if alarmBefore != nil && alarmDueEpoch == nil {
+            let data = fetchEnrichedData(includeSections: false)
+            alarmDueEpoch = data.reminders.first { $0.id == id }?.dueDate
+        }
+        let alarms = try buildAlarms(alarmAt: alarmAt, alarmBefore: alarmBefore, location: location,
+                                     latitude: latitude, longitude: longitude, proximity: proximity,
+                                     dueEpoch: alarmDueEpoch)
+        if !alarms.isEmpty { request["alarms"] = alarms }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            // EventKit fallback: core fields only (tags/repeat/flag/urgent degrade).
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            guard let reminder = writer.reminder(id: id) else {
+                fail("noSuchReminder", "找不到提醒：\(id)")
+            }
+            try writer.update(
+                reminder,
+                title: title,
+                notes: notes,
+                due: try parseDateOption(due),
+                start: try parseDateOption(start),
+                priority: priority.flatMap { try? parsePriority($0) }
+            )
+            var dict = reminderJSON(reminder)
+            if !tag.isEmpty || repeatRule != nil || flag || noFlag || urgent || noUrgent || section != nil {
+                dict["degraded"] = true
+            }
+            return dict
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - move
+
+struct Move: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "move",
+        abstract: "Move a reminder to another test list (ReminderKit write, EventKit fallback)"
+    )
+
+    @Argument(help: "Reminder ID")
+    var id: String
+
+    @Option(name: .long, help: "Target list name or ID")
+    var to: String?
+
+    @Option(name: .long, help: "Target list ID (preferred; disambiguates same-named lists)")
+    var toId: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        guard to != nil || toId != nil else {
+            throw ValidationError("需要指定目标列表：--to 或 --to-id")
+        }
+        var request: [String: Any] = ["op": "move", "id": id, "author": "remindkit"]
+        if let to { request["toListName"] = to }
+        if let toId { request["toListID"] = toId }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            let reminder = try ekResolveReminder(id, writer: writer)
+            let fromTitle = reminder.calendar.title
+            let target: EKCalendar
+            if let toId {
+                guard let cal = writer.calendar(namedOrID: toId) else {
+                    fail("noSuchList", "找不到目标列表：\(toId)")
+                }
+                target = cal
+            } else {
+                target = try ekResolveList(to ?? "", writer: writer)
+            }
+            try writer.move(reminder, to: target)
+            return ["id": id, "from": fromTitle, "to": target.title]
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - delete-list
+
+struct DeleteList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete-list",
+        abstract: "Permanently delete a list (regular or smart list)"
+    )
+
+    @Argument(help: "List name (optional if --id is given)")
+    var name: String?
+
+    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    var id: String?
+
+    @Flag(name: .long, help: "Confirm deletion (required — permanent, no undo)")
+    var yes: Bool = false
+
+    func run() throws {
+        guardWriteEnabled()
+        guard name != nil || id != nil else {
+            throw ValidationError("需要指定列表：name 参数或 --id")
+        }
+        guard yes else {
+            fail("confirmationRequired",
+                 "delete-list is permanent and cannot be undone (the whole list incl. its reminders is gone). Pass --yes to confirm.")
+        }
+        var request: [String: Any] = ["op": "deleteList", "author": "remindkit"]
+        if let name { request["listName"] = name }
+        if let id { request["listID"] = id }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            // EventKit fallback: remove the calendar.
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            let lookup = id ?? name ?? ""
+            guard let calendar = writer.calendar(namedOrID: lookup) else {
+                fail("noSuchList", "找不到列表：\(lookup)")
+            }
+            try store.removeCalendar(calendar, commit: true)
+            return ["listName": name ?? "", "deleted": true, "type": "list"]
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - update-list
+
+struct UpdateList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update-list",
+        abstract: "Rename / re-icon / re-color a list"
+    )
+
+    @Argument(help: "List name (optional if --id is given)")
+    var name: String?
+
+    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    var id: String?
+
+    @Option(name: .long, help: "New list name")
+    var newName: String?
+
+    @Option(name: .long, help: "New icon (single emoji)")
+    var icon: String?
+
+    @Option(name: .long, help: "New color: #RRGGBB hex or a preset name (red/orange/yellow/green/blue/purple/gray/brown)")
+    var color: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        guard name != nil || id != nil else {
+            throw ValidationError("需要指定列表：name 参数或 --id")
+        }
+        if newName == nil && icon == nil && color == nil {
+            throw ValidationError("至少提供一个要更新的字段：--new-name / --icon / --color")
+        }
+
+        var request: [String: Any] = ["op": "updateList", "author": "remindkit"]
+        if let name { request["listName"] = name }
+        if let id { request["listID"] = id }
+        if let newName { request["newName"] = newName }
+        if let icon { request["icon"] = icon }
+        if let color {
+            request["color"] = normalizeColor(color)
+            // pass the palette name through so the subprocess can pick the
+            // right REMColor symbolic name (gray/lightBlue/indigo/pink/rose
+            // honor the hex; red/orange/yellow/green/blue/purple/brown use the
+            // system palette color).
+            request["colorName"] = canonicalColorName(color)
+        }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            // EventKit fallback: rename via EKCalendar.
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            let lookup = id ?? name ?? ""
+            guard let calendar = writer.calendar(namedOrID: lookup) else {
+                fail("noSuchList", "找不到列表：\(lookup)")
+            }
+            if let newName { calendar.title = newName }
+            try store.saveCalendar(calendar, commit: true)
+            return ["listName": newName ?? name ?? "", "updated": true]
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+
+    /// Map the 12-color Reminders palette: preset names use the symbolic color,
+    /// others (lightBlue/indigo/pink/gray/rose) honor the hex value.
+    /// Returns the hex to write for a given color name (or the raw hex input).
+    private func canonicalColorName(_ value: String) -> String {
+        let canonical: [String: String] = [
+            "red": "red", "orange": "orange", "yellow": "yellow", "green": "green",
+            "lightblue": "lightBlue", "blue": "blue", "indigo": "indigo", "pink": "pink",
+            "purple": "purple", "brown": "brown", "gray": "gray", "grey": "gray",
+            "rose": "rose",
+        ]
+        if let name = canonical[value.lowercased()] { return name }
+        return "gray"
+    }
+
+    private func normalizeColor(_ value: String) -> String {
+        let palette: [String: String] = [
+            "red": "#FF383C", "orange": "#FF8D28", "yellow": "#FFCC00",
+            "green": "#83D754", "lightblue": "#5AC8FA", "blue": "#007AFF",
+            "indigo": "#5856D6", "pink": "#FF2D55", "purple": "#CB30E0",
+            "brown": "#AC7F5E", "gray": "#5B626A", "grey": "#5B626A",
+            "rose": "#D9A69F",
+        ]
+        if let hex = palette[value.lowercased()] { return hex }
+        return value
+    }
+}
+
+// MARK: - add-list
+
+struct AddList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add-list",
+        abstract: "Create a new reminder list (optionally inside a group)"
+    )
+
+    @Argument(help: "New list name")
+    var name: String
+
+    @Option(name: .long, help: "Create the list inside this group (group name)")
+    var group: String?
+
+    @Option(name: .long, help: "Create the list inside this group (group ID)")
+    var groupId: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        guard group == nil || groupId == nil else {
+            throw ValidationError("--group and --group-id are mutually exclusive")
+        }
+        var request: [String: Any] = ["op": "createList", "name": name, "author": "remindkit"]
+        if let group { request["groupName"] = group }
+        if let groupId { request["groupID"] = groupId }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            // EventKit fallback: no group support — plain top-level lists only.
+            guard group == nil && groupId == nil else {
+                fail("unsupportedByEventKit", "EventKit 兜底不支持在分组内创建列表（需要 ReminderKit 子进程）")
+            }
+            let store = RemindersAuth.requestAccessSync()
+            let writer = RemindersWriter(store: store)
+            let calendar = try writer.createList(named: name)
+            return ["calendar": ["id": calendar.calendarIdentifier, "title": calendar.title]]
+        }
+
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        // Normalize the subprocess shape {id, name} to {calendar: {id, title}}.
+        if let id = result["id"] as? String, out["calendar"] == nil {
+            out["calendar"] = ["id": id, "title": result["name"] ?? name]
+        }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - add-group
+
+struct AddGroup: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add-group",
+        abstract: "Create a group (folder) to hold lists"
+    )
+
+    @Argument(help: "New group name")
+    var name: String
+
+    func run() throws {
+        guardWriteEnabled()
+        let request: [String: Any] = ["op": "createGroup", "name": name, "author": "remindkit"]
+        let (source, result) = try writeWithReminderKit(request) {
+            fail("unsupportedByEventKit", "EventKit 不支持分组（需要 ReminderKit 子进程）")
+        }
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        if let id = result["id"] as? String {
+            out["group"] = ["id": id, "title": result["name"] ?? name]
+        }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - add-section
+
+struct AddSection: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add-section",
+        abstract: "Add a section to a list (reminders can then be filed into it via add --section / update --section)"
+    )
+
+    @Argument(help: "List name or ID")
+    var list: String
+
+    @Argument(help: "New section name")
+    var name: String
+
+    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        var request: [String: Any] = ["op": "addSection", "name": name, "author": "remindkit"]
+        if let listId { request["listID"] = listId } else { request["listName"] = list }
+        let (source, result) = try writeWithReminderKit(request) {
+            fail("unsupportedByEventKit", "EventKit 不支持分区（需要 ReminderKit 子进程）")
+        }
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - add-smartlist
+
+struct AddSmartList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add-smartlist",
+        abstract: "Create a custom smart list (optionally with a color)"
+    )
+
+    @Argument(help: "New smart list name")
+    var name: String
+
+    @Option(name: .long, help: "Custom display name (defaults to the name)")
+    var displayName: String?
+
+    @Option(name: .long, help: "Color hex, e.g. #FF3B30")
+    var color: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        var request: [String: Any] = ["op": "createSmartList", "name": name, "author": "remindkit"]
+        if let displayName { request["displayName"] = displayName }
+        if let color { request["color"] = color }
+        let (source, result) = try writeWithReminderKit(request) {
+            fail("unsupportedByEventKit", "EventKit 不支持智能列表（需要 ReminderKit 子进程）")
+        }
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
+// MARK: - move-list
+
+struct MoveList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "move-list",
+        abstract: "Move a list into/out of a group, or set its display order"
+    )
+
+    @Argument(help: "List name or ID")
+    var list: String
+
+    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
+    @Option(name: .long, help: "Target group name (move the list into this group)")
+    var toGroup: String?
+
+    @Option(name: .long, help: "Target group ID")
+    var toGroupId: String?
+
+    @Flag(name: .long, help: "Move the list out of its group to the top level")
+    var outOfGroup: Bool = false
+
+    @Option(name: .long, help: "Display order (integer)")
+    var order: Int?
+
+    func validate() throws {
+        if toGroup != nil && toGroupId != nil {
+            throw ValidationError("--to-group and --to-group-id are mutually exclusive")
+        }
+        if (toGroup != nil || toGroupId != nil) && outOfGroup {
+            throw ValidationError("--to-group/--to-group-id and --out-of-group are mutually exclusive")
+        }
+        if toGroup == nil && toGroupId == nil && !outOfGroup && order == nil {
+            throw ValidationError("specify --to-group/--to-group-id, --out-of-group, or --order")
+        }
+    }
+
+    func run() throws {
+        guardWriteEnabled()
+        var request: [String: Any] = ["op": "moveList", "listName": list, "author": "remindkit"]
+        if let listId { request["listID"] = listId }
+        if let toGroup { request["groupName"] = toGroup }
+        if let toGroupId { request["groupID"] = toGroupId }
+        if outOfGroup { request["outOfGroup"] = true }
+        if let order { request["order"] = order }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            fail("unsupportedByEventKit", "EventKit 不支持分组（需要 ReminderKit 子进程）")
+        }
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
