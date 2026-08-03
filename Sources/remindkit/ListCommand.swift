@@ -22,9 +22,17 @@ struct List: ParsableCommand {
 
         switch format {
         case .json:
+            // 一次拿全结构（agent 友好）：parentUUID 映射成分组名 parentTitle，附上列表备注 note
+            let notes = NotesStore(fileURL: NotesStore.defaultURL()).load()
+            let groupsById = Dictionary(uniqueKeysWithValues: entries.filter(\.isGroup).map { ($0.id, $0.title) })
+            let output = filtered.map { e in
+                ListEntryOutput(e,
+                    parentTitle: e.parentUUID.flatMap { groupsById[$0] },
+                    note: notes[e.id])
+            }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(filtered)
+            let data = try encoder.encode(output)
             print(String(data: data, encoding: .utf8)!)
         case .count:
             let encoder = JSONEncoder()
@@ -80,6 +88,33 @@ private func line(for e: CalendarEntry, suffix: String = "", note: String? = nil
     let sections = (e.sections?.count ?? 0) > 0 ? " [\(e.sections!.count) sections]" : ""
     let noteText = note.map { "  (\($0))" } ?? ""
     return "\(icon) \(e.title)\(suffix)\(sections)\(noteText)"
+}
+
+/// JSON 输出模型：CalendarEntry + 分组名 + 备注（顶层列表 parentTitle 为 null）
+private struct ListEntryOutput: Codable {
+    let id: String
+    let title: String
+    let isGroup: Bool
+    let icon: String?
+    let color: String?
+    let sections: [String]?
+    let parentUUID: String?
+    let parentTitle: String?
+    let note: String?
+    let order: Int
+
+    init(_ e: CalendarEntry, parentTitle: String?, note: String?) {
+        id = e.id
+        title = e.title
+        isGroup = e.isGroup
+        icon = e.icon
+        color = e.color
+        sections = e.sections
+        parentUUID = e.parentUUID
+        self.parentTitle = parentTitle
+        self.note = note
+        order = e.order
+    }
 }
 
 struct ListCountResult: Codable {

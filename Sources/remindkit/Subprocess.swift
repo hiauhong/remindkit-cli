@@ -1,13 +1,23 @@
 import EventKitCore
 import Foundation
 
+// MARK: - Swift 6 strict-concurrency helper
+
+/// Mutable reference box for capturing results out of `@Sendable` closures
+/// (`Task` / `DispatchQueue.async`). Safe because every call site waits on a
+/// semaphore (or the data is otherwise complete) before reading `.value`.
+final class CaptureBox<Value>: @unchecked Sendable {
+    var value: Value?
+    init() {}
+}
+
 // MARK: - Structured errors
 
 /// Emit a machine-readable error object on stderr and exit.
 /// Agents should parse stderr; stdout is reserved for data.
 /// Refuse write operations when read-only mode is on. Set
 /// `REMINDKIT_READ_ONLY=1` (environment or `remindkit --read-only`) to make
-/// every write command (add/complete/delete/move/create-list/update-list/
+/// every write command (add/complete/delete/move/add-list/update-list/
 /// delete-list/restore) fail safely instead of mutating reminders.
 func guardWriteEnabled() {
     let env = ProcessInfo.processInfo.environment
@@ -56,17 +66,17 @@ protocol ErrorCoded: LocalizedError {
 
 func fetchEventKitData() -> EventKitRaw {
     let semaphore = DispatchSemaphore(value: 0)
-    var result: EventKitRaw?
-    var fetchError: Error?
+    let resultBox = CaptureBox<EventKitRaw>()
+    let errorBox = CaptureBox<Error>()
 
     Task {
         do {
             let store = try await RemindersAuth.requestAccess()
             let ekStore = RemindersStore(store: store)
             let raw = await ekStore.fetchAll()
-            result = raw
+            resultBox.value = raw
         } catch {
-            fetchError = error
+            errorBox.value = error
         }
         semaphore.signal()
     }
@@ -74,10 +84,10 @@ func fetchEventKitData() -> EventKitRaw {
     while semaphore.wait(timeout: .now()) == .timedOut {
         RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
     }
-    if let fetchError {
+    if let fetchError = errorBox.value {
         fail(fetchError)
     }
-    return result!
+    return resultBox.value!
 }
 
 // MARK: - ReminderKit Subprocess
@@ -85,7 +95,9 @@ func fetchEventKitData() -> EventKitRaw {
 /// Run the ReminderKit subprocess in read mode. Pass `includeSections: false`
 /// to skip per-reminder section lookups (the slow part — ~4ms × reminders in
 /// sectioned lists through remindd) when the caller doesn't need the field.
-func runReminderKitSubprocess(includeSections: Bool = true) -> ReminderKitRaw? {
+/// Pass `listsOnly: true` to skip reminder enumeration entirely (structure
+/// only — `setup`'s default evaluates lists without reading their contents).
+func runReminderKitSubprocess(includeSections: Bool = true, listsOnly: Bool = false) -> ReminderKitRaw? {
     guard let binaryURL = findSubprocessBinary() else {
         fputs("remindkit: warning: ReminderKit subprocess not found, falling back to EventKit\n", stderr)
         return nil
@@ -93,9 +105,10 @@ func runReminderKitSubprocess(includeSections: Bool = true) -> ReminderKitRaw? {
 
     let process = Process()
     process.executableURL = binaryURL
-    if !includeSections {
-        process.arguments = ["--no-sections"]
-    }
+    var args: [String] = []
+    if !includeSections { args.append("--no-sections") }
+    if listsOnly { args.append("--lists-only") }
+    process.arguments = args
 
     let pipe = Pipe()
     let errPipe = Pipe()
@@ -103,16 +116,16 @@ func runReminderKitSubprocess(includeSections: Bool = true) -> ReminderKitRaw? {
     process.standardError = errPipe
 
     // 子进程输出较大时 pipe buffer 会满, 必须在 waitUntilExit 之前开始读
-    var outputData = Data()
-    var errData = Data()
+    let outputBox = CaptureBox<Data>()
+    let errBox = CaptureBox<Data>()
     let doneReading = DispatchSemaphore(value: 0)
     let doneErr = DispatchSemaphore(value: 0)
     DispatchQueue.global().async {
-        outputData = pipe.fileHandleForReading.readDataToEndOfFile()
+        outputBox.value = pipe.fileHandleForReading.readDataToEndOfFile()
         doneReading.signal()
     }
     DispatchQueue.global().async {
-        errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        errBox.value = errPipe.fileHandleForReading.readDataToEndOfFile()
         doneErr.signal()
     }
 
@@ -125,18 +138,18 @@ func runReminderKitSubprocess(includeSections: Bool = true) -> ReminderKitRaw? {
         doneReading.wait()
         doneErr.wait()
 
-        guard !outputData.isEmpty else {
+        guard !(outputBox.value?.isEmpty ?? true) else {
             // Surface the subprocess stderr only when the run failed — on
             // success it carries nothing but ReminderKit internal logs, which
             // would pollute the caller's stderr for agents.
-            emitSubprocessStderr(errData)
+            emitSubprocessStderr(errBox.value ?? Data())
             fputs("remindkit: warning: ReminderKit subprocess produced no output, falling back to EventKit\n", stderr)
             return nil
         }
 
-        return try JSONDecoder().decode(ReminderKitRaw.self, from: outputData)
+        return try JSONDecoder().decode(ReminderKitRaw.self, from: outputBox.value!)
     } catch {
-        emitSubprocessStderr(errData)
+        emitSubprocessStderr(errBox.value ?? Data())
         fputs("remindkit: warning: ReminderKit subprocess failed, falling back to EventKit: \(error.localizedDescription)\n", stderr)
         return nil
     }
@@ -192,16 +205,16 @@ func runReminderKitWrite(_ request: [String: Any]) -> [String: Any]? {
     process.standardOutput = outputPipe
     process.standardError = errPipe
 
-    var outputData = Data()
-    var errData = Data()
+    let outputBox = CaptureBox<Data>()
+    let errBox = CaptureBox<Data>()
     let doneReading = DispatchSemaphore(value: 0)
     let doneErr = DispatchSemaphore(value: 0)
     DispatchQueue.global().async {
-        outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        outputBox.value = outputPipe.fileHandleForReading.readDataToEndOfFile()
         doneReading.signal()
     }
     DispatchQueue.global().async {
-        errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        errBox.value = errPipe.fileHandleForReading.readDataToEndOfFile()
         doneErr.signal()
     }
 
@@ -217,14 +230,14 @@ func runReminderKitWrite(_ request: [String: Any]) -> [String: Any]? {
         doneReading.wait()
         doneErr.wait()
 
-        guard !outputData.isEmpty else {
-            emitSubprocessStderr(errData)
+        guard !(outputBox.value?.isEmpty ?? true) else {
+            emitSubprocessStderr(errBox.value ?? Data())
             fputs("remindkit: warning: ReminderKit subprocess produced no output, falling back to EventKit\n", stderr)
             return nil
         }
-        return try JSONSerialization.jsonObject(with: outputData) as? [String: Any]
+        return try JSONSerialization.jsonObject(with: outputBox.value!) as? [String: Any]
     } catch {
-        emitSubprocessStderr(errData)
+        emitSubprocessStderr(errBox.value ?? Data())
         fputs("remindkit: warning: ReminderKit write subprocess failed, falling back to EventKit: \(error.localizedDescription)\n", stderr)
         return nil
     }

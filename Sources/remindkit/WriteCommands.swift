@@ -577,8 +577,24 @@ struct Complete: ParsableCommand {
 
         var out: [String: Any] = ["ok": true, "source": source]
         for (k, v) in result where k != "ok" { out[k] = v }
+
+        // 重复提醒：完成后 remindd 会自动把同一 ID 滚动到下一期（dueDate 变未来、仍未完成）。
+        // 显式提示 agent，避免把「已完成」误判为永久完成（如每月充值、每周 gtd）。
+        if completed, let next = nextOccurrenceAfterComplete(id: id) {
+            out["nextOccurrence"] = next.epoch
+            out["nextOccurrenceText"] = next.text
+        }
         try jsonOut(out)
     }
+}
+
+/// 完成操作后重新查询该提醒：若同一 ID 仍未完成且带未来 dueDate，
+/// 说明重复规则已滚动到下一期，返回下一期日期（epoch + 可读文本）。
+private func nextOccurrenceAfterComplete(id: String) -> (epoch: Double, text: String)? {
+    let data = fetchEnrichedData()
+    guard let r = data.reminders.first(where: { $0.id == id }) else { return nil }
+    guard !r.completed, let due = r.dueDate else { return nil }
+    return (due, reminderDateText(due) ?? "")
 }
 
 // MARK: - Recently-deleted cache
@@ -1101,11 +1117,11 @@ struct UpdateList: ParsableCommand {
     }
 }
 
-// MARK: - create-list
+// MARK: - add-list
 
-struct CreateList: ParsableCommand {
+struct AddList: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "create-list",
+        commandName: "add-list",
         abstract: "Create a new reminder list (optionally inside a group)"
     )
 
@@ -1148,11 +1164,11 @@ struct CreateList: ParsableCommand {
     }
 }
 
-// MARK: - create-group
+// MARK: - add-group
 
-struct CreateGroup: ParsableCommand {
+struct AddGroup: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "create-group",
+        commandName: "add-group",
         abstract: "Create a group (folder) to hold lists"
     )
 
@@ -1204,11 +1220,11 @@ struct AddSection: ParsableCommand {
     }
 }
 
-// MARK: - create-smartlist
+// MARK: - add-smartlist
 
-struct CreateSmartList: ParsableCommand {
+struct AddSmartList: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "create-smartlist",
+        commandName: "add-smartlist",
         abstract: "Create a custom smart list (optionally with a color)"
     )
 

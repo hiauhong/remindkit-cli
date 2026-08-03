@@ -4,133 +4,245 @@ import Foundation
 struct Setup: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "setup",
-        abstract: "First-run guided setup: record how you use Reminders (conventions + list notes)"
+        abstract: "Annotate every list: structure-only evaluation (default) or lists+contents (--deep), confirm, save, print ordered structure with notes"
     )
 
-    @Flag(name: .long, help: "Non-interactive: print conventions status and exit (agent-friendly)")
+    @Flag(name: .long, help: "Non-interactive: print setup state and exit (agent-friendly)")
     var status: Bool = false
 
-    @Flag(name: .long, help: "Re-run setup even if conventions already exist")
-    var force: Bool = false
+    @Flag(name: .long, help: "Also read each list's reminders for a content-based evaluation (slower, more accurate)")
+    var deep: Bool = false
+
+    @Flag(name: .long, help: "Non-interactive: accept candidate notes and save without confirmation (agent-friendly; only fills lists without a note)")
+    var accept: Bool = false
 
     func run() throws {
-        let convStore = ConventionsStore(fileURL: ConventionsStore.defaultURL())
         let notesStore = NotesStore(fileURL: NotesStore.defaultURL())
+        let convStore = ConventionsStore(fileURL: ConventionsStore.defaultURL())
 
-        // Agent path: report state, never block on stdin.
         if status {
-            try printStatus(convStore)
+            try printStatus(notesStore, convStore)
             return
         }
 
-        let existing = convStore.load()
-        if existing != nil && !force {
-            print("remindkit: conventions already exist at \(convStore.fileURL.path)")
-            print()
-            print(existing!)
-            print()
-            print("Re-run with `remindkit setup --force` to reconfigure.")
-            return
-        }
-
-        guard isInteractive() else {
+        guard accept || isInteractive() else {
             fail("nonInteractive",
-                 "`setup` is a guided interview; run it in a terminal, or check state with `setup --status`.")
+                 "`setup` is interactive; run it in a terminal, or use `setup --accept` to save candidate notes non-interactively, or check state with `setup --status`.")
         }
 
-        print("""
-        ─────────────────────────────────────────────────────────
-        remindkit 首次设置：记录你「怎么用提醒事项」
-        回答几个问题，结果会保存为：
-          约定层 → conventions.md（agent 读它理解你的方法论）
-          语义层 → 列表备注（note），查询时自动携带
-        ─────────────────────────────────────────────────────────
-        """)
+        // Default reads structure only (never touches reminder contents);
+        // --deep reads lists + their reminders for a richer evaluation.
+        let data = deep ? fetchEnrichedData(includeSections: true) : fetchListStructure()
+        if accept {
+            try runSetupAccept(notesStore, data, deep: deep)
+        } else {
+            try runSetup(notesStore, data, deep: deep)
+        }
+    }
 
-        let data = fetchEnrichedData(includeSections: false)
-        let listNames = data.calendars.filter { !$0.isGroup }.map(\.title)
-        let joined = listNames.joined(separator: "、")
+    // MARK: - The setup flow: read → evaluate → confirm → save → print structure
 
-        var a = SetupAnswers()
-        a.inboxList = ask("「收集」这类列表你叫什么（新想法先放这）", default: a.inboxList, choices: listNames) ?? a.inboxList
-        a.inboxPurpose = ask("「\(a.inboxList)」是做什么的？", default: a.inboxPurpose) ?? a.inboxPurpose
-        a.okrList = ask("长期目标规划用哪个列表？", default: a.okrList, choices: listNames) ?? a.okrList
-        a.okrPurpose = ask("「\(a.okrList)」是做什么的？", default: a.okrPurpose) ?? a.okrPurpose
-        a.flagMeaning = ask("旗标（flagged）代表什么？", default: a.flagMeaning) ?? a.flagMeaning
-        a.defaultList = ask("新建提醒默认放哪个列表？", default: a.defaultList, choices: listNames) ?? a.defaultList
+    private func runSetup(_ notesStore: NotesStore, _ data: EnrichedData, deep: Bool) throws {
+        let all = data.calendars
+        let lists = all.filter { !$0.isGroup }
+        let groups = all.filter { $0.isGroup }
+        let byParent = Dictionary(grouping: lists) { $0.parentUUID }
 
-        print("\n你当前有这些列表：\(joined)")
-        print("想为其中几个添加用途备注（note）吗？列表备注能让 agent 读写时选对列表。")
-        var notesDone = 0
+        // Display order: each folder followed by its lists, then top-level.
+        var ordered: [CalendarEntry] = []
+        for g in groups { ordered.append(contentsOf: byParent[g.id] ?? []) }
+        ordered.append(contentsOf: byParent[nil] ?? [])
+        let covered = Set(ordered.map(\.id))
+        ordered.append(contentsOf: lists.filter { !covered.contains($0.id) })
+
+        var notes = notesStore.load()
+        var edited: [String: String] = [:]   // listID -> user-confirmed text
+
+        let emptyHint = deep ? "" : "（空——可运行 `setup --deep` 读内容评估）"
+
         while true {
-            let input = ask("输入列表名添加备注（直接回车结束）", default: nil, choices: listNames)
-            guard let name = input, !name.isEmpty else { break }
-            let matches = resolveListsOrFail(data.calendars, name)
-            if matches.count > 1 {
-                print("  「\(name)」重名，请用完整 UUID：\(matches.map(\.id).joined(separator: " 或 "))")
+            print("── 我对你的列表的理解\(deep ? "（含列表内容）" : "（仅列表结构）") ──")
+            var n = 0
+            for g in groups {
+                print("📁 \(g.title)")
+                for l in (byParent[g.id] ?? []) {
+                    n += 1
+                    print(line(n, l, notes, edited, data, deep: deep, emptyHint: emptyHint))
+                }
+            }
+            let top = byParent[nil] ?? []
+            if !top.isEmpty {
+                print("• 顶层")
+                for l in top {
+                    n += 1
+                    print(line(n, l, notes, edited, data, deep: deep, emptyHint: emptyHint))
+                }
+            }
+            print()
+            print("[回车] 全部确认保存 ｜ N 文案 = 改第 N 个（仅 N = 清除） ｜ q = 退出不保存")
+            guard let input = readLine() else { return }
+            let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { break }
+            if trimmed == "q" || trimmed == "quit" { return }
+
+            let parts = trimmed.split(separator: " ", maxSplits: 1)
+            guard let numStr = parts.first, let idx = Int(numStr), idx >= 1, idx <= ordered.count else {
+                print("  ✗ 没看懂：输入编号（如 `3 想买的数码产品`）或直接回车确认。")
                 continue
             }
-            let cal = matches[0]
-            let purpose = ask("  「\(cal.title)」的用途？", default: nil, choices: nil)
-            if let purpose, !purpose.isEmpty {
-                var notes = notesStore.load()
-                notes[cal.id] = purpose
-                try notesStore.save(notes)
-                notesDone += 1
-                print("  ✓ 已保存备注")
+            let list = ordered[idx - 1]
+            let rest = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
+            if rest.isEmpty {
+                edited.removeValue(forKey: list.id)
+                notes.removeValue(forKey: list.id)
+                print("  ✓ 已清除「\(list.title)」的备注")
+            } else {
+                edited[list.id] = rest
+                print("  ✓ 已设置「\(list.title)」：\(rest)")
             }
         }
 
-        print("\n其它想告诉 agent 的使用约定？（如「新提醒默认加 #生活 标签」，空行结束）")
-        while true {
-            let line = ask("  >", default: nil, choices: nil)
-            guard let line, !line.isEmpty else { break }
-            a.extra.append(line)
-        }
-
-        try convStore.save(renderConventions(a))
-        print("\n✓ 约定已保存到 \(convStore.fileURL.path)")
-        print("✓ 本次设置了 \(notesDone) 条列表备注")
-        print("\n完成。之后 agent 会读取这些信息来理解你的提醒事项。")
-        print("（可用 `remindkit setup --force` 重新配置）")
+        // Save: user-confirmed text wins; untouched lists get the candidate
+        // (skipped when empty — e.g. a structure-only pass on a bare list).
+        try saveAndPrint(notesStore, ordered, data, deep: deep, edited: edited)
     }
 
-    private func printStatus(_ convStore: ConventionsStore) throws {
-        let exists = convStore.load()
-        if let text = exists {
-            print("{\"configured\":true,\"file\":\"\(convStore.fileURL.path)\"}")
-            print()
-            print(text)
+    /// 非交互接受：直接保存候选备注（仅填充还没有备注的列表，不覆盖已有），
+    /// 打印与交互版相同的结构结果。agent 环境无需 TTY。
+    private func runSetupAccept(_ notesStore: NotesStore, _ data: EnrichedData, deep: Bool) throws {
+        try saveAndPrint(notesStore, orderedCalendars(data), data, deep: deep)
+    }
+
+    /// 列表显示顺序：每个分组下的列表，然后是顶层，最后兜底。
+    private func orderedCalendars(_ data: EnrichedData) -> [CalendarEntry] {
+        let lists = data.calendars.filter { !$0.isGroup }
+        let groups = data.calendars.filter(\.isGroup)
+        let byParent = Dictionary(grouping: lists) { $0.parentUUID }
+        var ordered: [CalendarEntry] = []
+        for g in groups { ordered.append(contentsOf: byParent[g.id] ?? []) }
+        ordered.append(contentsOf: byParent[nil] ?? [])
+        let covered = Set(ordered.map(\.id))
+        ordered.append(contentsOf: lists.filter { !covered.contains($0.id) })
+        return ordered
+    }
+
+    /// 保存（edited 优先 → 已有保留 → 候选填空）并打印带备注的结构。
+    private func saveAndPrint(_ notesStore: NotesStore, _ ordered: [CalendarEntry], _ data: EnrichedData,
+                              deep: Bool, edited: [String: String] = [:]) throws {
+        var notes = notesStore.load()
+        for l in ordered {
+            if let text = edited[l.id] {
+                notes[l.id] = text
+            } else if notes[l.id] == nil {
+                let c = candidate(l, data, deep: deep)
+                if !c.isEmpty { notes[l.id] = c }
+            }
+        }
+        try notesStore.save(notes)
+
+        let groups = data.calendars.filter(\.isGroup)
+        let byParent = Dictionary(grouping: data.calendars.filter { !$0.isGroup }) { $0.parentUUID }
+        let emptyHint = deep ? "" : "（空——可运行 `setup --deep` 读内容评估）"
+
+        // Final: the ordered structure (folders included) with notes attached.
+        print("\n✓ 已保存 \(notes.count) 条列表备注到 \(notesStore.fileURL.path)")
+        print("\n── 列表结构（带备注） ──")
+        for g in groups {
+            print("📁 \(g.title)")
+            for l in (byParent[g.id] ?? []) {
+                let noteText = notes[l.id] ?? (emptyHint.isEmpty ? "" : emptyHint)
+                print("   - \(l.title)  「\(noteText)」")
+            }
+        }
+        for l in (byParent[nil] ?? []) {
+            print("• \(l.title)  「\(notes[l.id] ?? "")」")
+        }
+        print("\n（之后可用 `note` 命令或 `setup` / `setup --deep` / `setup --accept` 随时修改）")
+    }
+
+    // MARK: - Helpers
+
+    private func line(_ n: Int, _ l: CalendarEntry, _ notes: [String: String],
+                      _ edited: [String: String], _ data: EnrichedData,
+                      deep: Bool, emptyHint: String) -> String {
+        let confirmed = edited[l.id] ?? notes[l.id]
+        let text = confirmed ?? candidate(l, data, deep: deep)
+        let marker = confirmed != nil ? "✓" : (notes[l.id] != nil ? "•" : " ")
+        let shown = text.isEmpty ? emptyHint : text
+        return "\(n). \(l.title) [\(marker)]  \(shown)"
+    }
+
+    /// Structure-only evaluation (default): sections, folder, icon.
+    /// Content-based evaluation (--deep): counts, sections, tags, samples.
+    private func candidate(_ l: CalendarEntry, _ data: EnrichedData, deep: Bool) -> String {
+        deep ? contentCandidate(l, data) : structureCandidate(l, data)
+    }
+
+    private func structureCandidate(_ l: CalendarEntry, _ data: EnrichedData) -> String {
+        var parts: [String] = []
+        if let secs = l.sections, !secs.isEmpty {
+            parts.append("分区[\(secs.joined(separator: "/"))]")
+        }
+        if let pu = l.parentUUID, let group = data.calendars.first(where: { $0.id == pu }) {
+            parts.append("位于「\(group.title)」")
+        }
+        if let icon = l.icon, !icon.isEmpty {
+            parts.append("图标\(icon)")
+        }
+        return parts.joined(separator: " ｜ ")
+    }
+
+    private func contentCandidate(_ l: CalendarEntry, _ data: EnrichedData) -> String {
+        let r = data.reminders.filter { $0.calendarId == l.id }
+        var parts = [countsLine(r)]
+        if let secs = l.sections, !secs.isEmpty {
+            parts.append("分区[\(secs.joined(separator: "/"))]")
+        }
+        let tags = topTags(r, limit: 3)
+        if !tags.isEmpty { parts.append("标签[\(tags.joined(separator: ","))]") }
+        let samples = r.filter { !$0.completed }.prefix(2).map(\.title)
+        if !samples.isEmpty { parts.append("例[\(samples.joined(separator: "、"))]") }
+        return parts.joined(separator: " ｜ ")
+    }
+
+    private func countsLine(_ reminders: [ReminderEntry]) -> String {
+        let total = reminders.count
+        let incomplete = reminders.filter { !$0.completed }.count
+        return "\(incomplete)/\(total) 未完成"
+    }
+
+    private func topTags(_ reminders: [ReminderEntry], limit: Int) -> [String] {
+        var freq: [String: Int] = [:]
+        for r in reminders {
+            for t in r.tags ?? [] { freq[t, default: 0] += 1 }
+        }
+        return freq.sorted { $0.value > $1.value }.prefix(limit).map(\.key)
+    }
+
+    private func printStatus(_ notesStore: NotesStore, _ convStore: ConventionsStore) throws {
+        let notes = notesStore.load()
+        let conv = convStore.load()
+        let payload: [String: Any] = [
+            "notesConfigured": !notes.isEmpty,
+            "notesCount": notes.count,
+            "notesFile": notesStore.fileURL.path,
+            "conventionsConfigured": conv != nil,
+            "conventionsFile": convStore.fileURL.path,
+        ]
+        let json = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        print(String(data: json, encoding: .utf8) ?? "{}")
+        print()
+        if notes.isEmpty {
+            print("remindkit: 还没有列表备注。跑 `remindkit setup`（仅结构）或 `setup --deep`（含内容）为每个列表记录用途。")
         } else {
-            print("{\"configured\":false,\"file\":\"\(convStore.fileURL.path)\"}")
-            print()
-            print("remindkit: conventions not set up yet. Run `remindkit setup` in a terminal to record how you use Reminders.")
+            print("remindkit: 已有 \(notes.count) 条列表备注（\(notesStore.fileURL.path)）")
+        }
+        if conv == nil {
+            print("remindkit: 可选约定文件 conventions.md 未配置（需要跨列表方法论时手动创建）。")
         }
     }
-
-    // MARK: - Interview helpers
 
     private func isInteractive() -> Bool {
         isatty(FileHandle.standardInput.fileDescriptor) != 0
-    }
-
-    /// Ask one question with an optional default and optional choice hint.
-    /// Returns nil when the user just hits enter with no default.
-    private func ask(_ prompt: String, default dflt: String?, choices: [String]? = nil) -> String? {
-        var hint = ""
-        if let choices, !choices.isEmpty {
-            hint = "（可选：\(choices.joined(separator: "、"))）"
-        }
-        if let dflt {
-            print("\(prompt) [\(dflt)]\(hint)")
-        } else {
-            print("\(prompt)\(hint)")
-        }
-        print("> ", terminator: "")
-        fflush(stdout)
-        guard let line = readLine() else { return dflt }
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return dflt }
-        return trimmed
     }
 }

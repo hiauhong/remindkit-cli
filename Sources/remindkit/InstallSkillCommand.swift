@@ -25,20 +25,22 @@ struct InstallSkill: ParsableCommand {
         }
 
         let home = NSHomeDirectory()
+        var installed: [String] = []
         let failures = try install(
             source: sourceDir,
             targets: installClaude ? [home + "/.claude/skills/remindkit"] : [],
-            force: force
+            force: force,
+            installed: &installed
         ) + install(
             source: sourceDir,
             targets: installAgents ? [home + "/.agents/skills/remindkit"] : [],
-            force: force
+            force: force,
+            installed: &installed
         )
 
         if failures.isEmpty {
             print("Installed remindkit skill.")
-            print("  \(home)/.claude/skills/remindkit")
-            print("  \(home)/.agents/skills/remindkit")
+            for path in installed { print("  \(path)") }
         } else {
             for message in failures {
                 fputs("error: \(message)\n", stderr)
@@ -66,13 +68,15 @@ struct InstallSkill: ParsableCommand {
             binDir.deletingLastPathComponent().appendingPathComponent(".agents/skills/remindkit"),
             binDir.appendingPathComponent(".agents/skills/remindkit"),
             binDir.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".agents/skills/remindkit"),
+            // Homebrew: formula installs the skill to share/remindkit/skills/remindkit
+            binDir.deletingLastPathComponent().appendingPathComponent("share/remindkit/skills/remindkit"),
             cwd.appendingPathComponent(".agents/skills/remindkit"),
         ]
     }
 
     // MARK: - Install
 
-    private func install(source: URL, targets: [String], force: Bool) throws -> [String] {
+    private func install(source: URL, targets: [String], force: Bool, installed: inout [String]) throws -> [String] {
         let fm = FileManager.default
         var failures: [String] = []
         for target in targets {
@@ -87,6 +91,7 @@ struct InstallSkill: ParsableCommand {
             do {
                 try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try fm.copyItem(at: source, to: dest)
+                installed.append(dest.path)
             } catch {
                 failures.append("failed to install to \(target): \(error.localizedDescription)")
             }

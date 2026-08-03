@@ -42,6 +42,31 @@ struct EnrichedData {
     let source: DataSource
 }
 
+/// Fetch list structure only (groups/lists/sections/order) without
+/// enumerating reminders. `setup`'s default mode evaluates each list from
+/// its structure alone; `setup --deep` uses the full `fetchEnrichedData`
+/// (structure + contents).
+func fetchListStructure() -> EnrichedData {
+    if let rk = runReminderKitSubprocess(includeSections: true, listsOnly: true),
+       let rawLists = rk.lists {
+        return EnrichedData(
+            reminders: [],
+            calendars: mergedCalendars(from: rawLists),
+            smartLists: mergedSmartLists(rk),
+            listIDsOrdering: rk.listIDsOrdering ?? [],
+            source: .reminderKit
+        )
+    }
+    let ek = fetchEventKitData()
+    return EnrichedData(
+        reminders: [],
+        calendars: ek.calendars.map { $0.toCalendarEntry() },
+        smartLists: [],
+        listIDsOrdering: [],
+        source: .eventKit
+    )
+}
+
 // MARK: - ReminderKit → unified schema
 
 func mergedReminders(from raw: [ReminderRaw]) -> [ReminderEntry] {
@@ -64,6 +89,7 @@ func mergedReminders(from raw: [ReminderRaw]) -> [ReminderEntry] {
             creationDate: r.creationDate,
             completionDate: r.completionDate,
             dueDate: r.dueDate,
+            dueDateText: reminderDateText(r.dueDate),
             startDate: r.startDate,
             allDay: r.allDay ?? false,
             timeZone: r.timeZone,
@@ -103,6 +129,7 @@ func mergedSmartLists(_ remindKit: ReminderKitRaw?) -> [SmartListEntry] {
         return SmartListEntry(
             uuid: uuid,
             name: $0.name,
+            type: $0.type,
             filterData: $0.filterData,
             icon: $0.icon,
             color: $0.color,
@@ -112,6 +139,32 @@ func mergedSmartLists(_ remindKit: ReminderKitRaw?) -> [SmartListEntry] {
 }
 
 // MARK: - EventKit fallback → unified schema
+
+/// 提醒日期 epoch → 本地时区可读文本（yyyy-MM-dd HH:mm）。
+/// agent 直接可用（epoch 需要自己转换，容易错时区）。
+func reminderDateText(_ epoch: Double?) -> String? {
+    guard let epoch else { return nil }
+    return reminderDateFormatter.string(from: Date(timeIntervalSince1970: epoch))
+}
+
+/// 查询命令的 section 策略（分区字段查询较慢，逐条过 remindd）：
+///   --no-sections → 强制不带（性能）
+///   --sections    → 强制带
+///   默认           → 显式指定了 --list 时带（列表结构查询的核心诉求），否则不带
+func sectionsEnabled(force: Bool, disable: Bool, hasList: Bool) -> Bool {
+    if disable { return false }
+    if force { return true }
+    return hasList
+}
+
+private let reminderDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm"
+    f.timeZone = .current
+    f.locale = Locale(identifier: "en_US_POSIX")   // 强制 24 小时制，避免「上午12:00」
+    return f
+}()
+
 
 extension EventKitReminder {
     func toReminderEntry() -> ReminderEntry {
@@ -125,6 +178,7 @@ extension EventKitReminder {
             creationDate: creationDate,
             completionDate: completionDate,
             dueDate: dueDate,
+            dueDateText: reminderDateText(dueDate),
             startDate: startDate,
             allDay: false,
             timeZone: nil,
@@ -248,4 +302,27 @@ func resolveListsOrFail(_ calendars: [CalendarEntry], _ filter: String) -> [Cale
     } catch {
         fail(error)
     }
+}
+
+/// Resolve a `--list` filter against smart lists (system + custom), same
+/// precedence as `resolveListFilter`: exact UUID → UUID prefix → exact title
+/// (case-insensitive) → substring. Returns empty when nothing matches so the
+/// caller can fall back / report `noSuchList` itself.
+func resolveSmartListFilter(_ smartLists: [SmartListEntry], _ filter: String) -> [SmartListEntry] {
+    let trimmed = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return [] }
+    let lower = trimmed.lowercased()
+
+    let exactID = smartLists.filter { $0.uuid == trimmed }
+    if !exactID.isEmpty { return exactID }
+
+    if lower.count >= 8 {
+        let prefix = smartLists.filter { $0.uuid.lowercased().hasPrefix(lower) }
+        if !prefix.isEmpty { return prefix }
+    }
+
+    let exactTitle = smartLists.filter { ($0.name ?? "").caseInsensitiveCompare(trimmed) == .orderedSame }
+    if !exactTitle.isEmpty { return exactTitle }
+
+    return smartLists.filter { ($0.name ?? "").localizedCaseInsensitiveContains(trimmed) }
 }

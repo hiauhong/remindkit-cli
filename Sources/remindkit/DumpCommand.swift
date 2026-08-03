@@ -17,8 +17,16 @@ struct Dump: ParsableCommand {
     @Option(name: .long, help: "Only output these reminder fields (comma-separated): id,title,dueDate,completed,…")
     var fields: String?
 
+    @Flag(name: .long, help: "Also include system smart lists (今天/旗标/已完成/已分配) — virtual views whose items live in regular lists; excluded by default")
+    var systemSmartlists: Bool = false
+
     func run() throws {
         let data = fetchEnrichedData()
+
+        // 系统智能列表（今天/旗标/已完成/已分配）是虚拟视图，事项都引用自普通列表，
+        // 默认不输出；自定义智能列表（type: custom）始终保留。
+        let smartLists = systemSmartlists ? data.smartLists
+            : data.smartLists.filter { !isSystemSmartList($0) }
 
         let dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -33,7 +41,7 @@ struct Dump: ParsableCommand {
                 "reminders": reminders,
             ]
             out["calendars"] = try data.calendars.map { try jsonCompatible($0) }
-            out["smartLists"] = try data.smartLists.map { try jsonCompatible($0) }
+            out["smartLists"] = try smartLists.map { try jsonCompatible($0) }
             out["listIDsOrdering"] = data.listIDsOrdering
             try jsonOut(out)
             return
@@ -45,7 +53,7 @@ struct Dump: ParsableCommand {
             source: data.source,
             calendars: data.calendars,
             reminders: data.reminders,
-            smartLists: data.smartLists,
+            smartLists: smartLists,
             listIDsOrdering: data.listIDsOrdering
         )
 
@@ -63,6 +71,15 @@ struct Dump: ParsableCommand {
             printCount(output)
         }
     }
+}
+
+// MARK: - Helpers
+
+/// 系统智能列表（今天/旗标/已完成/已分配）是虚拟视图，事项都引用自普通列表，
+/// dump 默认不输出；自定义智能列表（type: custom）始终输出。
+private func isSystemSmartList(_ sl: SmartListEntry) -> Bool {
+    guard let type = sl.type else { return false }
+    return type.hasPrefix("com.apple.reminders.smartlist.") && type != "com.apple.reminders.smartlist.custom"
 }
 
 // MARK: - Output Formats

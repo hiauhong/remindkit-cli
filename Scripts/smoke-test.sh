@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # remindkit smoke test — run against the built binary.
 #
-# Test discipline (hard rule, see AGENTS.md "Test discipline"): the script
+# Test discipline (hard rule): the script
 # ONLY ever touches lists/groups/smart lists whose name starts with
 # 「测试冒烟」(test smoke), which it creates itself and removes at the end.
 # It NEVER writes to real lists — real user data must be identical before
@@ -143,18 +143,18 @@ done
 # ── Write path (protected sandbox) ───────────────────────────────────────────
 echo "-- write path (smoke lists only) --"
 
-LIST_A_ID=$("$BIN" create-list "$LIST_A" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
-check "create-list returns id" "ok" "$(test -n "$LIST_A_ID" && echo ok || echo no)"
+LIST_A_ID=$("$BIN" add-list "$LIST_A" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+check "add-list returns id" "ok" "$(test -n "$LIST_A_ID" && echo ok || echo no)"
 
 REM_ID=$("$BIN" add "$REMINDER" --list-id "$LIST_A_ID" --due 2099-01-01 --priority high --tag smoke --notes "smoke test" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 check "add returns id" "ok" "$(test -n "$REM_ID" && echo ok || echo no)"
 
 # ── Hierarchy write path (group → list-in-group → section → filed reminder) ──
-GROUP_ID=$("$BIN" create-group "测试冒烟分组$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin)['group']['id'])")
-check "create-group returns id" "ok" "$(test -n "$GROUP_ID" && echo ok || echo no)"
+GROUP_ID=$("$BIN" add-group "测试冒烟分组$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin)['group']['id'])")
+check "add-group returns id" "ok" "$(test -n "$GROUP_ID" && echo ok || echo no)"
 
-LIST_IN_GROUP_ID=$("$BIN" create-list "测试冒烟组内$TAG" --group-id "$GROUP_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
-check "create-list --group returns id" "ok" "$(test -n "$LIST_IN_GROUP_ID" && echo ok || echo no)"
+LIST_IN_GROUP_ID=$("$BIN" add-list "测试冒烟组内$TAG" --group-id "$GROUP_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+check "add-list --group returns id" "ok" "$(test -n "$LIST_IN_GROUP_ID" && echo ok || echo no)"
 
 check "add-section ok" "ok" "$("$BIN" add-section "测试冒烟组内$TAG" "测试冒烟分区$TAG" | python3 -c "import json,sys; print('ok' if json.load(sys.stdin).get('ok') else 'bad')")"
 
@@ -164,8 +164,8 @@ check "add --section returns id" "ok" "$(test -n "$REM_IN_SECTION" && echo ok ||
 "$BIN" add-section "测试冒烟组内$TAG" "测试冒烟分区2$TAG" >/dev/null 2>&1
 check "update --section moves" "测试冒烟分区2$TAG" "$("$BIN" update "$REM_IN_SECTION" --section "测试冒烟分区2$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('changes', {}).get('section', ''))")"
 
-SL_ID=$("$BIN" create-smartlist "测试冒烟智能$TAG" --color "#FF3B30" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-check "create-smartlist returns id" "ok" "$(test -n "$SL_ID" && echo ok || echo no)"
+SL_ID=$("$BIN" add-smartlist "测试冒烟智能$TAG" --color "#FF3B30" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+check "add-smartlist returns id" "ok" "$(test -n "$SL_ID" && echo ok || echo no)"
 
 OUT=$("$BIN" dump)
 check "hierarchy: reminder filed into section" "ok" "$(echo "$OUT" | python3 -c "
