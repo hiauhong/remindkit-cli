@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # remindkit smoke test — run against the built binary.
 #
-# Test discipline (hard rule, see AGENTS.md "Test discipline"): the script
+# Test discipline (hard rule): the script
 # ONLY ever touches lists/groups/smart lists whose name starts with
 # 「测试冒烟」(test smoke), which it creates itself and removes at the end.
 # It NEVER writes to real lists — real user data must be identical before
