@@ -18,7 +18,8 @@ R=".build/release/remindkit"
 fail=0
 checked_lines=0
 report="$(mktemp)"
-trap 'rm -f "$report"' EXIT
+TMPHOME="$(mktemp -d)"
+trap 'rm -f "$report"; rm -rf "$TMPHOME"' EXIT
 
 # 提取 SKILL.md 中 ```bash 代码块的行；strip 注释与续行符。
 awk '/^```bash/{b=1; next} /^```/{b=0} b' "$SKILL" | while IFS= read -r raw; do
@@ -77,6 +78,31 @@ for cmd in "${readonly_checks[@]}"; do
         fail=$((fail+1))
     fi
 done
+
+# --- install-skill 回归（历史 bug：argv[0] 是裸命令名时 binDir 错指 cwd，
+#      源被误判成目标 → --force 先删源再报 no such file）---
+R_BIN_DIR="$(cd "$(dirname "$R")" && pwd)"
+mkdir -p "$TMPHOME/.local/bin" "$TMPHOME/.agents/skills/remindkit"
+cp "$R" "$TMPHOME/.local/bin/remindkit"
+cp "$SKILL" "$TMPHOME/.agents/skills/remindkit/SKILL.md"
+
+# 用例1：源==目标（skill 只在全局位、二进制旁无源）时，--force 绝不能删掉唯一副本
+( cd "$TMPHOME" && HOME="$TMPHOME" PATH="$TMPHOME/.local/bin:$PATH" remindkit install-skill --agents --force >/dev/null 2>&1 )
+if [ -f "$TMPHOME/.agents/skills/remindkit/SKILL.md" ]; then
+    echo "ok: install-skill 源==目标时 --force 不删唯一副本"
+else
+    echo "✗ install-skill 源==目标时删掉了唯一副本（历史 bug 复发）"
+    fail=$((fail+1))
+fi
+
+# 用例2：裸命令名（argv[0]=remindkit）从无 skill 的 cwd 调用，靠 PATH 解析到真实源
+( cd /tmp && HOME="$TMPHOME" PATH="$R_BIN_DIR:$PATH" remindkit install-skill --agents --force >/dev/null 2>&1 )
+if [ -f "$TMPHOME/.agents/skills/remindkit/SKILL.md" ]; then
+    echo "ok: install-skill 裸命令名经 PATH 解析源并安装成功"
+else
+    echo "✗ install-skill 裸命令名找不到源/安装失败（历史 bug 复发）"
+    fail=$((fail+1))
+fi
 
 # setup --accept 也应可非交互运行（agent 场景核心路径）
 if ! "$R" setup --accept >/dev/null 2>&1; then
