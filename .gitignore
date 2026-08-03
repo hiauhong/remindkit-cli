@@ -16,12 +16,3 @@
 # User-local runtime data (personal conventions / list notes — never commit)
 conventions.md
 notes.json
-
-# Private working docs — personal planning/notes, NOT part of the open-source project
-/AGENTS.md
-/GOALS.md
-/docs/macos-permissions.md
-/docs/reminderkit-private-api.md
-/docs/remindkit-ecosystem-research.md
-/docs/remindkit-feature-pool.md
-/docs/remindkit-plan.md
