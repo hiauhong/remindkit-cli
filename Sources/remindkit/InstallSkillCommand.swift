@@ -66,6 +66,8 @@ struct InstallSkill: ParsableCommand {
             binDir.deletingLastPathComponent().appendingPathComponent(".agents/skills/remindkit"),
             binDir.appendingPathComponent(".agents/skills/remindkit"),
             binDir.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".agents/skills/remindkit"),
+            // Homebrew: formula installs the skill to share/remindkit/skills/remindkit
+            binDir.deletingLastPathComponent().appendingPathComponent("share/remindkit/skills/remindkit"),
             cwd.appendingPathComponent(".agents/skills/remindkit"),
         ]
     }

@@ -27,10 +27,10 @@ remindkit is a macOS command-line tool that exports structured data from Apple R
 ## Install
 
 ```bash
-# Homebrew
+# Homebrew (Apple Silicon / arm64 builds published)
 brew install hiauhong/tap/remindkit
 
-# Or from GitHub Releases
+# Or from GitHub Releases (arm64)
 curl -L https://github.com/hiauhong/remindkit-cli/releases/latest/download/remindkit \
   -o /usr/local/bin/remindkit && chmod +x /usr/local/bin/remindkit
 
@@ -40,6 +40,8 @@ curl -L https://github.com/hiauhong/remindkit-cli/releases/latest/download/remin
 # Teach your AI agent
 remindkit install-skill
 ```
+
+> Intel (x86_64) users: please build from source (`make build`) for now; arm64 binaries are published via Homebrew and GitHub Releases.
 
 > The install ships three parts: the `remindkit` CLI, the `fetch-remindkit` subprocess binary (must sit next to the CLI), and the `.agents/skills/remindkit/` skill source.
 

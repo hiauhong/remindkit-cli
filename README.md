@@ -27,10 +27,10 @@ remindkit 是一个 macOS 命令行工具，从 Apple Reminders（提醒事项�
 ## 安装
 
 ```bash
-# Homebrew
+# Homebrew（目前发布 Apple Silicon / arm64）
 brew install hiauhong/tap/remindkit
 
-# 或从 GitHub Releases 下载
+# 或从 GitHub Releases 下载（arm64）
 curl -L https://github.com/hiauhong/remindkit-cli/releases/latest/download/remindkit \
   -o /usr/local/bin/remindkit && chmod +x /usr/local/bin/remindkit
 
@@ -40,6 +40,8 @@ curl -L https://github.com/hiauhong/remindkit-cli/releases/latest/download/remin
 # 装完让 AI agent 学会用
 remindkit install-skill
 ```
+
+> Intel（x86_64）用户暂请从源码构建（`make build`）；arm64 二进制已通过 Homebrew 与 GitHub Releases 发布。
 
 > 安装包含三个部分：`remindkit` 主 CLI、`fetch-remindkit` 子进程二进制（必须与主 CLI 同目录）、`.agents/skills/remindkit/` skill 源。
 

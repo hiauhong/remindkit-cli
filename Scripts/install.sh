@@ -11,7 +11,7 @@
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-REPO="${REPO:-hiauhong/remindkit-cli}"
+REPO="${REPO:-hiauhong/remindkit}"
 ARCH="$(uname -m)"; [[ "$ARCH" == "arm64" ]] || ARCH="x86_64"
 
 info()  { printf "\033[1;34m→\033[0m %s\n" "$*"; }
