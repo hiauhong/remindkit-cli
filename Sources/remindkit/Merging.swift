@@ -147,6 +147,16 @@ func reminderDateText(_ epoch: Double?) -> String? {
     return reminderDateFormatter.string(from: Date(timeIntervalSince1970: epoch))
 }
 
+/// 查询命令的 section 策略（分区字段查询较慢，逐条过 remindd）：
+///   --no-sections → 强制不带（性能）
+///   --sections    → 强制带
+///   默认           → 显式指定了 --list 时带（列表结构查询的核心诉求），否则不带
+func sectionsEnabled(force: Bool, disable: Bool, hasList: Bool) -> Bool {
+    if disable { return false }
+    if force { return true }
+    return hasList
+}
+
 private let reminderDateFormatter: DateFormatter = {
     let f = DateFormatter()
     f.dateFormat = "yyyy-MM-dd HH:mm"

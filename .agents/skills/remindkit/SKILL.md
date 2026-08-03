@@ -51,6 +51,7 @@ allowed-tools:
 
 - 所有查询命令**默认只返回未完成**；`--completed` 只查已完成；`--all` 查全部（`--completed` 与 `--all` 互斥）。
 - **JSON 日期字段**：`dueDate` 是 epoch（Double），同时输出 `dueDateText`（本地时区 `yyyy-MM-dd HH:mm`，全天提醒为 `00:00`）——判断今天/过期/几天内直接用 `dueDateText`，勿手转 epoch。
+- **分区（section）字段**：查询命令**显式 `--list` 时自动带** `section`（列表结构查询的核心诉求，如「OKR 列表 → 健康/个人成长/财务…」）；无 `--list` 默认不带（性能，section 查询慢）。需要时 `--sections` 强制带 / `--no-sections` 强制跳过。
 - **输出格式自动切换**：终端（TTY）默认 `plain`，管道/agent 调用自动 `json`——agent 无需每次带 `--format json`；也可显式 `--format json|plain|count` 覆盖。
 - `count` 无完成态开关，始终显式输出 `{total, incomplete, completed, flagged, urgent, dueToday, overdue}`（默认 json，`--format plain` 给人看）。`count --by-list` 输出 `{total, incomplete, lists:[{id,title,icon,isGroup,parentTitle,total,…}]}`。
 - `--list` 解析顺序：完整 UUID → UUID 前缀（≥8 位）→ 精确标题（大小写不敏感）→ 子串；**匹配不到时报错退出**（见下），重名列表全部匹配并在 stderr 提示。

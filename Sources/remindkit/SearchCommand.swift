@@ -26,6 +26,12 @@ struct Search: ParsableCommand {
     @Option(name: .long, help: "Only output these fields (comma-separated): id,title,dueDate,completed,…")
     var fields: String?
 
+    @Flag(name: .long, help: "Include section field (default: auto — on when --list is given)")
+    var sections: Bool = false
+
+    @Flag(name: .long, help: "Skip section lookup (faster; default: auto)")
+    var noSections: Bool = false
+
     func validate() throws {
         if completed && all {
             throw ValidationError("--completed and --all are mutually exclusive")
@@ -33,7 +39,7 @@ struct Search: ParsableCommand {
     }
 
     func run() throws {
-        let data = fetchEnrichedData(includeSections: false)
+        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections, disable: noSections, hasList: list != nil))
 
         var filtered = data.reminders.filter { r in
             let q = query.lowercased()
