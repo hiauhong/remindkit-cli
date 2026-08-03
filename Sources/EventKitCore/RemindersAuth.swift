@@ -24,21 +24,27 @@ public enum RemindersAuth {
     /// `run()` is sync). Runs the async request on a Task while pumping the
     /// run loop, mirroring `fetchEventKitData()`.
     public static func requestAccessSync() -> EKEventStore {
+        // Swift 6 strict concurrency: capture state in a reference box instead of
+        // mutating captured vars from the Task. Safe because the semaphore wait
+        // below guarantees the Task finished before we read the box.
+        final class Box: @unchecked Sendable {
+            var result: EKEventStore?
+            var error: Error?
+        }
+        let box = Box()
         let semaphore = DispatchSemaphore(value: 0)
-        var result: EKEventStore?
-        var error: Error?
         Task {
             do {
-                result = try await requestAccess()
+                box.result = try await requestAccess()
             } catch let caught {
-                error = caught
+                box.error = caught
             }
             semaphore.signal()
         }
         while semaphore.wait(timeout: .now()) == .timedOut {
             RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
         }
-        if let error {
+        if let error = box.error {
             let rkError = error as? RemindKitError
             let message = rkError?.errorDescription ?? error.localizedDescription
             let code = rkError?.code ?? "failure"
@@ -48,7 +54,7 @@ public enum RemindersAuth {
             FileHandle.standardError.write(Data("\n".utf8))
             exit(rkError?.exitCode ?? 1)
         }
-        return result!
+        return box.result!
     }
 
     /// Non-prompting TCC status check. Safe to call from any context.

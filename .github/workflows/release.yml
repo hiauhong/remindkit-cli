@@ -6,7 +6,7 @@ name: release
 #
 # 需要的 secret：
 #   RELEASE_TOKEN — 用于推送 homebrew-tap（跨仓库，GITHUB_TOKEN 无权）。
-#     Fine-grained PAT：仓库访问选 hiaong/homebrew-tap（Contents: read+write），
+#     Fine-grained PAT：仓库访问选 hiauhong/homebrew-tap（Contents: read+write），
 #     或 classic PAT 带 `repo` scope。未配置时 tap 更新步骤跳过（Release 照常发布）。
 
 on:
