@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-14 # arm64 runner, matches published binaries
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (clang subprocess + Swift CLI)
+        run: make build
+
+      - name: Unit tests (pure logic — no Reminders TCC needed)
+        run: swift test
+
+      - name: Shell syntax check
+        run: bash -n Scripts/*.sh
+
+      # NOTE: smoke tests (Scripts/smoke-test.sh) need Reminders TCC permission
+      # and write real (test-namespaced) lists — they stay local-only (`make test`).

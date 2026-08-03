@@ -1,0 +1,68 @@
+name: release
+
+# 发版流水线：推送 v* tag 到公开仓库 → 构建 → 打包 → GitHub Release → 更新 homebrew-tap。
+# 触发方：`./Scripts/publish.sh --release vX.Y.Z`（本地同步 + 打 tag + 推送）。
+# 本 workflow 同时存在于私有仓库，但用 repo 守卫只允许公开仓库执行。
+#
+# 需要的 secret：
+#   RELEASE_TOKEN — 用于推送 homebrew-tap（跨仓库，GITHUB_TOKEN 无权）。
+#     Fine-grained PAT：仓库访问选 hiaong/homebrew-tap（Contents: read+write），
+#     或 classic PAT 带 `repo` scope。未配置时 tap 更新步骤跳过（Release 照常发布）。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: github.repository == 'hiauhong/remindkit-cli'
+    runs-on: macos-14 # arm64 runner, matches published binaries
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make build
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Package tarball
+        run: ./Scripts/package.sh --no-build
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARCH="$(uname -m)"
+          TARBALL="dist/remindkit-darwin-${ARCH}.tar.gz"
+          gh release create "$GITHUB_REF_NAME" "$TARBALL" --generate-notes
+
+      - name: Update homebrew-tap formula
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning::RELEASE_TOKEN secret not configured — skipping tap update (Release was published)."
+            exit 0
+          fi
+          set -euo pipefail
+          ARCH="$(uname -m)"
+          TARBALL="dist/remindkit-darwin-${ARCH}.tar.gz"
+          SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/hiauhong/homebrew-tap.git" /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+          sed -i '' \
+            -e "s/^  version \"[^\"]*\"/  version \"$VERSION\"/" \
+            -e "s|/download/v[0-9][0-9.]*/|/download/$GITHUB_REF_NAME/|" \
+            -e "s/    sha256 \"[^\"]*\"/    sha256 \"$SHA\"/" \
+            Formula/remindkit.rb
+          git config user.name "remindkit release bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add Formula/remindkit.rb
+          git commit -m "remindkit $GITHUB_REF_NAME"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/hiauhong/homebrew-tap.git" main
