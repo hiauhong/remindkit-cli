@@ -56,6 +56,14 @@ remindkit               # 或直接跑任意命令，首次会触发授权弹窗
 
 > 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制本身。在 agent 环境里授权失败时，用 `remindkit doctor --for-agent --json` 看责任进程并给它授权。
 
+授权后建议**先做一次全量导出基线备份**，同时验证读取正常：
+
+```bash
+remindkit dump > ~/reminders-backup.json
+```
+
+之后进行写操作（完成/删除/移动/批量）前可随时再 dump 对照，心里有底。
+
 ## 快速开始
 
 ```bash

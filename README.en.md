@@ -56,6 +56,14 @@ remindkit               # or just run any command — the first one triggers the
 
 > Permission belongs to the **host process** (your terminal app or agent host), not to the remindkit binary itself. If authorization fails inside an agent environment, run `remindkit doctor --for-agent --json` to see the responsible process and grant it there.
 
+After granting, it's a good idea to **take a full-export baseline backup** (also verifies reading works):
+
+```bash
+remindkit dump > ~/reminders-backup.json
+```
+
+Before any write operations (complete/delete/move/bulk) you can dump again and diff against the baseline for peace of mind.
+
 ## Quick start
 
 ```bash
