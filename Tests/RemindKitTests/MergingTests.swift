@@ -128,8 +128,8 @@ final class MergingTests: XCTestCase {
     func testMergedSmartListsSkipsNilUUID() {
         let raw = ReminderKitRaw(
             smartLists: [
-                SmartListRaw(name: "A", uuid: "U1", sortingStyle: nil, filterData: nil, icon: nil, color: nil),
-                SmartListRaw(name: "B", uuid: nil, sortingStyle: nil, filterData: nil, icon: nil, color: nil),
+                SmartListRaw(name: "A", uuid: "U1", type: nil, sortingStyle: nil, filterData: nil, icon: nil, color: nil),
+                SmartListRaw(name: "B", uuid: nil, type: nil, sortingStyle: nil, filterData: nil, icon: nil, color: nil),
             ],
             listIDsOrdering: nil, lists: nil, reminders: nil
         )
