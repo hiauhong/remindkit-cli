@@ -39,6 +39,17 @@ remindkit install-skill
 
 > The install ships three parts: the `remindkit` CLI, the `fetch-remindkit` subprocess binary (must sit next to the CLI), and the `.agents/skills/remindkit/` skill source.
 
+## First run: grant permission
+
+remindkit needs “Reminders” access (TCC). On first run macOS shows a permission prompt — click “Allow”:
+
+```bash
+remindkit doctor        # check permission state first (follow its hints if not granted)
+remindkit               # or just run any command — the first one triggers the prompt
+```
+
+> Permission belongs to the **host process** (your terminal app or agent host), not to the remindkit binary itself. If authorization fails inside an agent environment, run `remindkit doctor --for-agent --json` to see the responsible process and grant it there.
+
 ## Quick start
 
 ```bash

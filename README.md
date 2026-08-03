@@ -39,6 +39,17 @@ remindkit install-skill
 
 > 安装包含三个部分：`remindkit` 主 CLI、`fetch-remindkit` 子进程二进制（必须与主 CLI 同目录）、`.agents/skills/remindkit/` skill 源。
 
+## 首次运行：授权
+
+remindkit 需要「提醒事项」访问权限（TCC）。首次运行会弹出系统授权框，点击「允许」即可：
+
+```bash
+remindkit doctor        # 先检查权限状态（未授权时按提示操作）
+remindkit               # 或直接跑任意命令，首次会触发授权弹窗
+```
+
+> 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制本身。在 agent 环境里授权失败时，用 `remindkit doctor --for-agent --json` 看责任进程并给它授权。
+
 ## 快速开始
 
 ```bash
