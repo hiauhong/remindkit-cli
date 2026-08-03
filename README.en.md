@@ -1,8 +1,12 @@
 # remindkit — Apple Reminders data pipeline CLI
 
+[![Vibe coded](https://img.shields.io/badge/vibe-coded-%23ff69b4?style=flat-square)](https://en.wikipedia.org/wiki/Vibe_coding)
+
 [中文版](README.md)
 
 remindkit is a macOS command-line tool that exports structured data from Apple Reminders and supports the full write hierarchy (lists / groups / sections / tasks / subtasks). **Designed for AI agents**: unified JSON output, machine-parseable error contract, and a bundled agent skill.
+
+> 🎨 This project is **vibe coded** (AI-assisted development) — features, tests, and docs are all iterated in collaboration with an AI agent.
 
 > **⚠️ Disclaimer**
 > - remindkit reads data through Apple's **private framework** `ReminderKit.framework` (`dlopen` + Objective-C runtime messaging; no Apple code or headers included). Private APIs are **unsupported by Apple and may break with any macOS update** — use at your own risk.
