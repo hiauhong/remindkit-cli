@@ -20,6 +20,15 @@ brew install hiauhong/tap/remindkit
 ./Scripts/install.sh     # 装完自动注册 agent skill
 ```
 
+## 首次使用:授权 + 备份
+
+```bash
+remindkit doctor                        # ① 检查权限(首次会弹授权框,点「允许」)
+remindkit dump > ~/reminders-backup.json   # ② 先做全量基线备份
+```
+
+> 权限归属于宿主进程(终端/agent 宿主);之后进行写操作(完成/删除/移动/批量)前,可随时再 dump 对照,心里有底。
+
 ## 快速开始
 
 ```bash
