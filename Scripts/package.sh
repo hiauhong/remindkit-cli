@@ -23,8 +23,9 @@ mkdir -p "$STAGE/bin/.agents/skills"
 cp .build/release/remindkit "$STAGE/bin/remindkit"
 cp Binaries/fetch-remindkit "$STAGE/bin/fetch-remindkit"
 cp -R .agents/skills/remindkit "$STAGE/bin/.agents/skills/remindkit"
+cp -R .agents/skills/gtd "$STAGE/bin/.agents/skills/gtd"
 
 mkdir -p dist
 tar -czf "dist/remindkit-darwin-${ARCH}.tar.gz" -C "$STAGE" bin
 echo "✓ dist/remindkit-darwin-${ARCH}.tar.gz"
-echo "  contents: remindkit, fetch-remindkit, .agents/skills/remindkit/SKILL.md"
+echo "  contents: remindkit, fetch-remindkit, .agents/skills/remindkit/SKILL.md, .agents/skills/gtd/SKILL.md"
