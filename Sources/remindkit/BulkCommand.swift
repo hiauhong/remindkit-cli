@@ -57,6 +57,12 @@ struct Bulk: ParsableCommand {
     @Flag(name: .long, help: "update: unmark urgent")
     var noUrgentOp: Bool = false
 
+    @Option(name: .long, help: "update: set notes (replaces)")
+    var notes: String?
+
+    @Option(name: .long, help: "update: append to existing notes")
+    var notesAppend: String?
+
     // MARK: Safety
 
     @Flag(name: .long, help: "Preview the selection and exit without writing")
@@ -199,8 +205,26 @@ struct Bulk: ParsableCommand {
             if noFlag { request["flagged"] = false }
             if urgentOp { request["urgent"] = true }
             if noUrgentOp { request["urgent"] = false }
+            if let notes { request["notes"] = notes }
+            // --notes-append: read current notes and append (per reminder, since
+            // notes differ per item — reuse the read-side fetch).
+            var effectiveNotes = notes
+            if let append = notesAppend {
+                let data = fetchEnrichedData(includeSections: false)
+                let current = data.reminders.first { $0.id == id }?.notes ?? ""
+                effectiveNotes = current.isEmpty ? append : current + "\n" + append
+                request["notes"] = effectiveNotes
+            }
             let (source, result) = try writeWithReminderKit(request) {
-                fail("unsupportedByEventKit", "EventKit cannot write flagged/urgent; ReminderKit subprocess unavailable")
+                // EventKit supports notes but not flags/urgent.
+                if flag || noFlag || urgentOp || noUrgentOp {
+                    fail("unsupportedByEventKit", "EventKit cannot write flagged/urgent; ReminderKit subprocess unavailable")
+                }
+                let store = RemindersAuth.requestAccessSync()
+                let writer = RemindersWriter(store: store)
+                guard let ek = writer.reminder(id: id) else { fail("noSuchReminder", "找不到提醒：\(id)") }
+                try writer.update(ek, title: nil, notes: effectiveNotes, due: nil, start: nil, priority: nil)
+                return ["updated": true]
             }
             var dict: [String: Any] = ["source": source]
             if let changes = result["changes"] { dict["changes"] = changes }

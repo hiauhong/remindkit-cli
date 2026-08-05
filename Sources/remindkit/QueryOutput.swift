@@ -72,7 +72,7 @@ func printReminderEntries(_ entries: [ReminderEntry], format: QueryFormat,
     switch format {
     case .json:
         if let fields, !fields.isEmpty {
-            let projected = try entries.map { try projectReminder($0, fields: fields) }
+            let projected = try entries.map { try projectReminder($0, fields: fields, listNameById: listNameById) }
             let data = try JSONSerialization.data(withJSONObject: projected, options: [.sortedKeys])
             print(String(data: data, encoding: .utf8)!)
             return
@@ -107,13 +107,17 @@ func jsonCompatible<T: Encodable>(_ value: T) throws -> Any {
 }
 
 /// Project a reminder to only the requested keys (unknown keys are ignored).
-/// Relies on the Codable synthesis: optional fields are omitted when nil.
-func projectReminder(_ r: ReminderEntry, fields: [String]) throws -> [String: Any] {
+/// `listTitle` / `list` are resolved from the calendars map (not stored on the
+/// reminder itself), so list-aggregation queries don't need a full dump+join.
+func projectReminder(_ r: ReminderEntry, fields: [String], listNameById: [String: String] = [:]) throws -> [String: Any] {
     let dict = try jsonCompatible(r) as? [String: Any] ?? [:]
     guard !fields.isEmpty else { return dict }
     var out: [String: Any] = [:]
     for f in fields where !f.isEmpty {
         if let v = dict[f] { out[f] = v }
+    }
+    if fields.contains("listTitle") || fields.contains("list") {
+        out["listTitle"] = listNameById[r.calendarId] ?? ""
     }
     return out
 }

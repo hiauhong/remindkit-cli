@@ -66,7 +66,7 @@ allowed-tools:
 ## Token 效率守则
 
 - **优先 `count` / `search` / `today` 等定向查询**，全量 `dump` 一条提醒约 100~200 token，1000 条可达 10万+ token。
-- **`--fields id,title,dueDate,…` 投影**：query/today/overdue/scheduled/search/flagged/urgent/dump 都支持只输出需要的字段（逗号分隔；不存在的字段忽略；dump 时只投影 reminders，calendars/smartLists 保留）。只要几个字段时务必用它，可省 80%+ token。
+- **`--fields id,title,dueDate,…` 投影**：query/today/overdue/scheduled/search/flagged/urgent/dump 都支持只输出需要的字段（逗号分隔；不存在的字段忽略；dump 时只投影 reminders，calendars/smartLists 保留）。支持 `listTitle`/`list`（列表名投影，自动从日历表解析，省去本地 join）；`notes` 也在内。只要几个字段时务必用它，可省 80%+ token。
 - 一次会话需要多个独立查询时，用 `;` 在**同一个 Bash 调用**里串起来，别拆成多次调用。
 - 只要统计就 `count`，不要 `dump | jq length`。
 
@@ -92,6 +92,9 @@ remindkit scheduled --flagged --format json   # 带日期的旗标事项
 remindkit search "牛奶" --format json
 remindkit query --list 工作 --tag 紧急 --format json
 remindkit query --all --fields id,title,dueDate --format json   # 只取需要的字段（token 优化）
+remindkit query --completed --completed-after 2026-08-01 --fields id,title,completionDate \
+  # 按完成日期过滤（月度/周报回顾）：--completed-after / --completed-before（YYYY-MM-DD [HH:MM]）
+remindkit query --list <列表> --fields id,title,listTitle   # 列表归属投影，无需本地 join
 remindkit dump --fields id,title,dueDate,completed > slim.json  # dump 也只投影 reminders
 remindkit query --due-before 2026-08-01 --all --format json
 remindkit count --list 工作
@@ -161,13 +164,16 @@ remindkit bulk --op complete --list 待办 --due-before 2026-08-02   # 完成待
 remindkit bulk --op delete --list 测试列表 --all --dry-run         # 先预览再删
 remindkit bulk --op move --list 收集箱 --to 目的地                    # 收集箱的移到目的地
 remindkit bulk --op update --list 购物 --flag                       # 批量加旗标
+remindkit bulk --op update --list 收集箱 --notes-append "统一标注"   # 批量备注追加（40+ 次循环的替代）
+remindkit bulk --op update --list 收集箱 --notes "覆盖全部备注"       # 批量覆盖备注
 # 选择器：--list/--tag/--flagged/--urgent/--due-after/--due-before（至少一个）
 # 安全：--dry-run 预览；--limit N 上限（默认 50，超出拒绝）
 
 # 完成 / 重开 / 删除 / 移动 / 旗标紧急
 remindkit complete <id>          # 完成；重复提醒完成后自动滚动到下一期，响应带 nextOccurrence/nextOccurrenceText
 remindkit complete <id> --reopen  # 重开
-remindkit update <id> --flag          # 给已有提醒加旗标
+remindkit update <id> --flag          # 给已有提醒加旗标（--flag/--flagged 互为别名）
+remindkit update <id> --notes-append "补充信息"   # 备注追加（省一次读+拼接）
 remindkit update <id> --no-flag --urgent   # 去旗标 + 标紧急（可组合）
 remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --notes "备注" \\
   --priority high --tag 购物 --url "https://…" --repeat weekly --days mon,wed --until 2026-09-01

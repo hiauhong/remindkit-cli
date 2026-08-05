@@ -396,7 +396,7 @@ struct Add: ParsableCommand {
     @Flag(name: .long, help: "Mark as urgent")
     var urgent: Bool = false
 
-    @Flag(name: .long, help: "Mark as flagged")
+    @Flag(name: [.customLong("flagged"), .customLong("flag")], help: "Mark as flagged")
     var flagged: Bool = false
 
     @Option(name: .long, help: "Parent reminder ID (creates a subtask)")
@@ -816,6 +816,9 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "Repeat until YYYY-MM-DD")
     var until: String?
 
+    @Option(name: .long, help: "Append to the existing notes (instead of replacing)")
+    var notesAppend: String?
+
     @Option(name: .long, help: "Set an absolute alarm (YYYY-MM-DD HH:MM, repeatable)")
     var alarmAt: [String] = []
 
@@ -837,10 +840,10 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "Proximity for location reminder: arrive (default) or leave")
     var proximity: String?
 
-    @Flag(name: .long, help: "Set the flag (当前关注的短期任务)")
+    @Flag(name: [.customLong("flag"), .customLong("flagged")], help: "Set the flag (当前关注的短期任务)")
     var flag: Bool = false
 
-    @Flag(name: .long, help: "Clear the flag")
+    @Flag(name: [.customLong("no-flag"), .customLong("no-flagged")], help: "Clear the flag")
     var noFlag: Bool = false
 
     @Flag(name: .long, help: "Mark urgent")
@@ -856,7 +859,7 @@ struct Update: ParsableCommand {
         if urgent && noUrgent {
             throw ValidationError("--urgent and --no-urgent are mutually exclusive")
         }
-        if title == nil && notes == nil && due == nil && start == nil && priority == nil
+        if title == nil && notes == nil && notesAppend == nil && due == nil && start == nil && priority == nil
             && tag.isEmpty && url == nil && repeatRule == nil && until == nil
             && alarmAt.isEmpty && alarmBefore == nil && location == nil
             && !flag && !noFlag && !urgent && !noUrgent && section == nil {
@@ -869,6 +872,14 @@ struct Update: ParsableCommand {
         var request: [String: Any] = ["op": "update", "id": id, "author": "remindkit"]
         if let title { request["title"] = title }
         if let notes { request["notes"] = notes }
+        // --notes-append: read current notes and append (avoids a read+concat round-trip).
+        var effectiveNotes = notes
+        if let append = notesAppend {
+            let data = fetchEnrichedData(includeSections: false)
+            let current = data.reminders.first { $0.id == id }?.notes ?? ""
+            effectiveNotes = current.isEmpty ? append : current + "\n" + append
+            request["notes"] = effectiveNotes
+        }
         let dueRequested = try parseDateEpoch(due)
         if let dueRequested { request["due"] = dueRequested }
         if let start, let epoch = try parseDateEpoch(start) { request["start"] = epoch }
@@ -910,7 +921,7 @@ struct Update: ParsableCommand {
             try writer.update(
                 reminder,
                 title: title,
-                notes: notes,
+                notes: effectiveNotes,
                 due: try parseDateOption(due),
                 start: try parseDateOption(start),
                 priority: priority.flatMap { try? parsePriority($0) }

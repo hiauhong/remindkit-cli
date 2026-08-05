@@ -32,6 +32,12 @@ struct Query: ParsableCommand {
     @Option(name: .long, help: "Only reminders due before this date (YYYY-MM-DD [HH:MM])")
     var dueBefore: String?
 
+    @Option(name: .long, help: "Only reminders completed on or after this date (YYYY-MM-DD [HH:MM]) — for done/retro reviews")
+    var completedAfter: String?
+
+    @Option(name: .long, help: "Only reminders completed before this date (YYYY-MM-DD [HH:MM])")
+    var completedBefore: String?
+
     @Option(name: .long, help: "Output format: json, plain")
     var format: QueryFormat = .auto()
 
@@ -81,6 +87,13 @@ struct Query: ParsableCommand {
         }
         if let before = try parseDueDateOption(dueBefore) {
             filtered = filtered.filter { $0.dueDate != nil && $0.dueDate! < before.timeIntervalSince1970 }
+        }
+
+        if let after = try parseDueDateOption(completedAfter) {
+            filtered = filtered.filter { $0.completionDate != nil && $0.completionDate! >= after.timeIntervalSince1970 }
+        }
+        if let before = try parseDueDateOption(completedBefore) {
+            filtered = filtered.filter { $0.completionDate != nil && $0.completionDate! < before.timeIntervalSince1970 }
         }
 
         if tree {

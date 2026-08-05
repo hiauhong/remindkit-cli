@@ -33,7 +33,7 @@ struct Dump: ParsableCommand {
 
         // --fields: project reminders only (calendars/smartLists stay intact).
         if let names = parseFieldsOption(fields) {
-            let reminders = try data.reminders.map { try projectReminder($0, fields: names) }
+            let reminders = try data.reminders.map { try projectReminder($0, fields: names, listNameById: calendarTitles(from: data.calendars)) }
             var out: [String: Any] = [
                 "version": 1,
                 "exportedAt": dateFormatter.string(from: Date()),
