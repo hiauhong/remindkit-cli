@@ -14,7 +14,7 @@ struct Dump: ParsableCommand {
     @Option(name: .long, help: "Output format: json, plain, count")
     var format: OutputFormat = .json
 
-    @Option(name: .long, help: "Only output these reminder fields (comma-separated): id,title,dueDate,completed,…")
+    @Option(name: .long, help: "Only output these reminder fields (comma-separated): id,title,dueDate,completed,notes,listTitle,…")
     var fields: String?
 
     @Flag(name: .long, help: "Also include system smart lists (今天/旗标/已完成/已分配) — virtual views whose items live in regular lists; excluded by default")

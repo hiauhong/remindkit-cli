@@ -24,7 +24,7 @@ struct Flagged: ParsableCommand {
     @Option(name: .long, help: "Output format: json, plain")
     var format: QueryFormat = .auto()
 
-    @Option(name: .long, help: "Only output these fields (comma-separated): id,title,dueDate,completed,…")
+    @Option(name: .long, help: "Only output these fields (comma-separated): id,title,dueDate,completed,notes,listTitle,…")
     var fields: String?
 
     @Flag(name: .long, help: "Include section field (default: auto — on when --list is given)")
@@ -75,7 +75,7 @@ struct Urgent: ParsableCommand {
     @Option(name: .long, help: "Output format: json, plain")
     var format: QueryFormat = .auto()
 
-    @Option(name: .long, help: "Only output these fields (comma-separated): id,title,dueDate,completed,…")
+    @Option(name: .long, help: "Only output these fields (comma-separated): id,title,dueDate,completed,notes,listTitle,…")
     var fields: String?
 
     @Flag(name: .long, help: "Include section field (default: auto — on when --list is given)")
