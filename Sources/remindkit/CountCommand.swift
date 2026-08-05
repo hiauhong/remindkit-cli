@@ -60,7 +60,7 @@ struct Count: ParsableCommand {
         }
 
         var result = countBreakdown(filtered)
-        // Ambiguity hint: duplicate titles (e.g. two "数码" lists) were all
+        // Ambiguity hint: duplicate titles (e.g. two "工作" lists) were all
         // merged — tell the caller which ones, instead of a silent combined
         // number.
         if let matchedLists, matchedLists.count > 1 {

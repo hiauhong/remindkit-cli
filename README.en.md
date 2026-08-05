@@ -36,7 +36,7 @@ remindkit                # overview: today / overdue / upcoming / flagged / urge
 remindkit today          # due today
 remindkit overdue        # overdue
 remindkit search "milk"  # search
-remindkit add "buy milk" --list 日常 --due "2026-08-03 09:00"
+remindkit add "buy milk" --list 待办 --due "2026-08-03 09:00"
 remindkit complete <id>  # complete
 ```
 
@@ -51,7 +51,7 @@ remindkit complete <id>  # complete
 
 ## Safety
 
-- Lists with duplicate names (e.g. two 「财务」) must be addressed by ID; `delete-list` is permanent and requires `--yes`
+- Lists with duplicate names (e.g. two 「工作」) must be addressed by ID; `delete-list` is permanent and requires `--yes`
 - Test writes only on self-created 「测试冒烟*」 lists; created and cleaned up, zero leftovers
 
 ## Development

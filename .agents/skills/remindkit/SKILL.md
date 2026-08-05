@@ -101,11 +101,11 @@ remindkit list --groups --format json
 
 # 列表备注（sidecar 元数据，苹果没有列表描述字段）
 remindkit note --all                              # 查看所有列表备注（含分组和智能列表）
-remindkit note --list 数码                        # 读取某个列表备注
-remindkit note --list <完整UUID> --set "想买的数码产品"   # 设置（重名必须用 UUID）
+remindkit note --list 购物                        # 读取某个列表备注
+remindkit note --list <完整UUID> --set "购物清单"   # 设置（重名必须用 UUID）
 remindkit note --list <完整UUID> --clear          # 清除
-remindkit note --list 旗标 --set "当前焦点"         # 智能列表也可读写备注（按名/UUID）
-remindkit note --list BE0D0E6D --set "..."        # 智能列表 UUID 前缀（旗标）
+remindkit note --list 焦点 --set "重要事项"         # 智能列表也可读写备注（按名/UUID）
+remindkit note --list <UUID前缀> --set "..."      # 智能列表 UUID 前缀
 # 智能列表：系统（今天/旗标/已完成/已分配）+ 自定义均可读可写；note --all 输出带 isSmartList/smartListType 标识
 # 存储：~/.local/share/remindkit/notes.json（可用 REMINDKIT_NOTES_FILE 改路径，如放 iCloud Drive 自动同步）
 # list --format json 输出携带 id/title/icon/color/sections/parentTitle/note/order（一次拿全结构）
@@ -120,7 +120,7 @@ remindkit count --by-list                                      # 统计视角
 remindkit query --list <完整UUID> --fields title,dueDate --all # 内容视角（必须 UUID）
 remindkit query --list <完整UUID> --tree                      # 结构视图：分区→任务→子任务层级树
 # 4. 写回：
-remindkit note --list <完整UUID> --set "每月账单缴费提醒：电费/水费/房贷/五险一金/燃气费"
+remindkit note --list <完整UUID> --set "每月账单缴费提醒"
 # 5. 复查：
 remindkit list --format plain    # 树形含备注
 # 幂等：已有合理备注的列表不要覆盖；只补空的/机械的。setup 是交互式向导（需真人终端），agent 禁用。
@@ -137,7 +137,7 @@ remindkit doctor --for-agent --json
 
 > **只读保护**：环境变量 `REMINDKIT_READ_ONLY=1` 时所有写命令（add/update/complete/delete/move/bulk/add-list/add-group/add-section/add-smartlist/delete-list/update-list/restore）拒绝执行，报 `{"error":{"code":"readOnly"}}`——agent 在只读场景（如纯查询会话）可设置它防误写。
 > **测试纪律（硬规则）**：写操作测试只能在**新建**的「测试冒烟*」列表/分组上做，自建自删（`make test` 的冒烟脚本会自建并自动删除，最后校验零残留）。**绝不直接对真实列表执行写测试**。
-> **同名列表**：按名字操作遇到重名（如两个「财务」）会报歧义错误并列出候选 ID——此时必须改用 `--id`/`--list-id`/`--to-id` 精确定位。
+> **同名列表**：按名字操作遇到重名（如两个「工作」）会报歧义错误并列出候选 ID——此时必须改用 `--id`/`--list-id`/`--to-id` 精确定位。
 
 ```bash
 # 新建提醒（写走 ReminderKit 私有框架，EventKit 兜底；输出 JSON 含 source）
@@ -145,7 +145,7 @@ remindkit add "买牛奶" --list 测试列表 --due "2026-08-03 09:00" --priorit
   --repeat weekly --days mon,wed --until 2026-12-31 --notes "备注" \
   --tag 购物 --tag 生活 --urgent --flagged --parent <父提醒ID> \
   --url "https://example.com" --alarm-before 30 \
-  --location "深圳湾" --latitude 22.52 --longitude 113.94
+  --location "<地点>" --latitude <纬度> --longitude <经度>
 
 # 常用参数：--notes / --due (YYYY-MM-DD 全天 | YYYY-MM-DD HH:MM) / --start / --priority high|medium|low \
 #   --repeat hourly|daily|weekdays|weekends|weekly|monthly|yearly / --every N / --days mon,tue,... / --until YYYY-MM-DD \
@@ -157,17 +157,17 @@ remindkit add "买牛奶" --list 测试列表 --due "2026-08-03 09:00" --priorit
 #   注意：--repeat 未给 --due 时自动算下一个符合规则的日期作为到期日
 
 # 批量操作（先条件选择，再统一执行）
-remindkit bulk --op complete --list 日常 --due-before 2026-08-02   # 完成日常里过期的
+remindkit bulk --op complete --list 待办 --due-before 2026-08-02   # 完成待办里过期的
 remindkit bulk --op delete --list 测试列表 --all --dry-run         # 先预览再删
-remindkit bulk --op move --list 收集 --to 想去                      # 收集的移到想去
-remindkit bulk --op update --list 数码 --flag                       # 批量加旗标
+remindkit bulk --op move --list 收集箱 --to 目的地                    # 收集箱的移到目的地
+remindkit bulk --op update --list 购物 --flag                       # 批量加旗标
 # 选择器：--list/--tag/--flagged/--urgent/--due-after/--due-before（至少一个）
 # 安全：--dry-run 预览；--limit N 上限（默认 50，超出拒绝）
 
 # 完成 / 重开 / 删除 / 移动 / 旗标紧急
 remindkit complete <id>          # 完成；重复提醒完成后自动滚动到下一期，响应带 nextOccurrence/nextOccurrenceText
 remindkit complete <id> --reopen  # 重开
-remindkit update <id> --flag          # 给已有提醒加旗标（当前焦点）
+remindkit update <id> --flag          # 给已有提醒加旗标
 remindkit update <id> --no-flag --urgent   # 去旗标 + 标紧急（可组合）
 remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --notes "备注" \\
   --priority high --tag 购物 --url "https://…" --repeat weekly --days mon,wed --until 2026-09-01

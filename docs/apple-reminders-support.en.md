@@ -62,7 +62,7 @@
 |---------|------|------|
 | Today | `today` | `--include-overdue` to include past due |
 | Scheduled | `scheduled` | `--within N` / `--from/--to` range |
-| Flagged | `flagged` | Incomplete flagged (your current focus) |
+| Flagged | `flagged` | Incomplete flagged |
 | Urgent | `urgent` | Incomplete urgent |
 | All | `dump` / `query --all` | `dump` exports full JSON |
 | Completed | `query --completed` | Uniformly supported across query commands |

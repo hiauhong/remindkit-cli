@@ -36,7 +36,7 @@ remindkit                # 概览:今天/过期/未来/旗标/紧急
 remindkit today          # 今日到期
 remindkit overdue        # 已过期
 remindkit search "牛奶"   # 搜索
-remindkit add "买牛奶" --list 日常 --due "2026-08-03 09:00"
+remindkit add "买牛奶" --list 待办 --due "2026-08-03 09:00"
 remindkit complete <id>  # 完成
 ```
 
@@ -51,7 +51,7 @@ remindkit complete <id>  # 完成
 
 ## 安全约定
 
-- 同名列表(如两个「财务」)用 ID 定位;`delete-list` 永久删除需 `--yes`
+- 同名列表(如两个「工作」)用 ID 定位;`delete-list` 永久删除需 `--yes`
 - 测试写操作只在「测试冒烟*」列表,自建自删、零残留
 
 ## 开发

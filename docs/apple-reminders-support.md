@@ -62,7 +62,7 @@
 |---------|------|------|
 | 今日 | `today` | `--include-overdue` 含过期 |
 | 计划 | `scheduled` | `--within N` / `--from/--to` 区间 |
-| 已标记 | `flagged` | 未完成旗标（你的"当前焦点"） |
+| 已标记 | `flagged` | 未完成旗标 |
 | 紧急 | `urgent` | 未完成紧急 |
 | 全部 | `dump` / `query --all` | dump 全量导出 JSON |
 | 已完成 | `query --completed` | 各查询命令统一支持 |

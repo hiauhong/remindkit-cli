@@ -87,11 +87,11 @@ final class MergingTests: XCTestCase {
         [
             CalendarEntry(id: "AAAAAAAA-1111-2222-3333-444444444444", title: "工作", isGroup: false,
                           icon: nil, color: nil, sections: nil, parentUUID: nil, order: 0),
-            CalendarEntry(id: "BBBBBBBB-1111-2222-3333-444444444444", title: "财务", isGroup: false,
+            CalendarEntry(id: "BBBBBBBB-1111-2222-3333-444444444444", title: "工作", isGroup: false,
                           icon: nil, color: nil, sections: nil, parentUUID: nil, order: 1),
-            CalendarEntry(id: "CCCCCCCC-1111-2222-3333-444444444444", title: "财务", isGroup: false,
+            CalendarEntry(id: "CCCCCCCC-1111-2222-3333-444444444444", title: "工作", isGroup: false,
                           icon: nil, color: nil, sections: nil, parentUUID: nil, order: 2),
-            CalendarEntry(id: "DDDDDDDD-1111-2222-3333-444444444444", title: "数码选题", isGroup: false,
+            CalendarEntry(id: "DDDDDDDD-1111-2222-3333-444444444444", title: "测试选题", isGroup: false,
                           icon: nil, color: nil, sections: nil, parentUUID: nil, order: 3),
         ]
     }
@@ -103,17 +103,17 @@ final class MergingTests: XCTestCase {
 
     func testResolveListFilterUUIDPrefix() throws {
         let hit = try resolveListFilter(makeCalendars(), "BBBBBBBB-1111")
-        XCTAssertEqual(hit.map(\.title), ["财务"])
+        XCTAssertEqual(hit.map(\.title), ["工作"])
     }
 
     func testResolveListFilterExactTitleReturnsAllDuplicates() throws {
-        let hit = try resolveListFilter(makeCalendars(), "财务")
-        XCTAssertEqual(hit.count, 2) // both 财务 lists
+        let hit = try resolveListFilter(makeCalendars(), "工作")
+        XCTAssertEqual(hit.count, 2) // both 工作 lists
     }
 
     func testResolveListFilterSubstringFallback() throws {
         let hit = try resolveListFilter(makeCalendars(), "选题")
-        XCTAssertEqual(hit.map(\.title), ["数码选题"])
+        XCTAssertEqual(hit.map(\.title), ["测试选题"])
     }
 
     func testResolveListFilterNoMatchThrows() {

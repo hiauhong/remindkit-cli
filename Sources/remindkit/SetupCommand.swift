@@ -87,7 +87,7 @@ struct Setup: ParsableCommand {
 
             let parts = trimmed.split(separator: " ", maxSplits: 1)
             guard let numStr = parts.first, let idx = Int(numStr), idx >= 1, idx <= ordered.count else {
-                print("  ✗ 没看懂：输入编号（如 `3 想买的数码产品`）或直接回车确认。")
+                print("  ✗ 没看懂：输入编号（如 `3 购物清单`）或直接回车确认。")
                 continue
             }
             let list = ordered[idx - 1]
