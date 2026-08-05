@@ -33,7 +33,6 @@ if [[ -x "$LOCAL_BUILD_DIR/.build/release/remindkit" && -x "$LOCAL_BUILD_DIR/Bin
     cp "$LOCAL_BUILD_DIR/.build/release/remindkit" "$INSTALL_DIR/remindkit"
     cp "$LOCAL_BUILD_DIR/Binaries/fetch-remindkit" "$INSTALL_DIR/fetch-remindkit"
     install_skill "$LOCAL_BUILD_DIR/.agents/skills/remindkit" "$INSTALL_DIR/.agents/skills/remindkit"
-    install_skill "$LOCAL_BUILD_DIR/.agents/skills/gtd" "$INSTALL_DIR/.agents/skills/gtd"
 else
     info "Fetching latest release..."
     LATEST="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
@@ -45,7 +44,6 @@ else
     cp "$TMP/bin/remindkit" "$INSTALL_DIR/remindkit"
     cp "$TMP/bin/fetch-remindkit" "$INSTALL_DIR/fetch-remindkit"
     install_skill "$TMP/bin/.agents/skills/remindkit" "$INSTALL_DIR/.agents/skills/remindkit"
-    install_skill "$TMP/bin/.agents/skills/gtd" "$INSTALL_DIR/.agents/skills/gtd"
 fi
 
 chmod +x "$INSTALL_DIR/remindkit" "$INSTALL_DIR/fetch-remindkit"
@@ -57,13 +55,6 @@ if [[ "${REMINDKIT_SKIP_SKILL:-0}" != "1" ]]; then
         ok "Skill installed to ~/.agents/skills/remindkit — agents (pi, codex, …) will discover remindkit automatically"
     else
         warn "Auto skill install failed — run manually: remindkit install-skill --agents"
-    fi
-    # GTD 方法论 skill(纯 skill,无 CLI 命令,直接同步)
-    if [[ -d "$INSTALL_DIR/.agents/skills/gtd" ]]; then
-        rm -rf "$HOME/.agents/skills/gtd"
-        mkdir -p "$HOME/.agents/skills"
-        cp -R "$INSTALL_DIR/.agents/skills/gtd" "$HOME/.agents/skills/gtd"
-        ok "GTD skill installed to ~/.agents/skills/gtd"
     fi
 else
     warn "REMINDKIT_SKIP_SKILL=1 — skipped skill registration. Run 'remindkit install-skill --agents' to register later."
