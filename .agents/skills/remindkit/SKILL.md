@@ -56,6 +56,12 @@ allowed-tools:
 - **输出格式自动切换**：终端（TTY）默认 `plain`，管道/agent 调用自动 `json`——agent 无需每次带 `--format json`；也可显式 `--format json|plain|count` 覆盖。
 - `count` 无完成态开关，始终显式输出 `{total, incomplete, completed, flagged, urgent, dueToday, overdue}`（默认 json，`--format plain` 给人看）。`count --by-list` 输出 `{total, incomplete, lists:[{id,title,icon,isGroup,parentTitle,total,…}]}`。
 - `--list` 解析顺序：完整 UUID → UUID 前缀（≥8 位）→ 精确标题（大小写不敏感）→ 子串；**匹配不到时报错退出**（见下），重名列表全部匹配并在 stderr 提示。
+- **提醒字段语义（查询输出 JSON）**：输出是「固定核心 + 稀疏可选」混合——**固定字段永远在**（即使 false/0/[]），**可选字段有值才出现**（nil 直接省略 key，不输出 null）：
+  - 固定（10）：`id`(UUID) `calendarId`(所属列表 UUID) `title` `completed` `priority` `allDay` `flagged` `urgent` `order`(列表内排序值) `subtaskIds`(`[]`=无子任务)
+  - 可选（有值才出现）：`notes` `creationDate` `completionDate` `dueDate`(epoch) `dueDateText`(本地时区 yyyy-MM-dd HH:mm) `startDate` `timeZone` `recurrenceRules`(JSON 字符串) `tags` `url` `alarms` `section`(分区名) `parentId`(存在=是子任务，值=父提醒 UUID)
+  - **`priority` 值域**：`0`=无，`1`=低，`5`=中，`9`=高（写端 `--priority high|medium|low|none` 对应 9/5/1/0，也接受 0-9）
+  - **`alarms` 结构**：`[{type: date|interval|dueDateDelta|location, date?, interval?, delta?, proximity?(1=进入/2=离开), location?{title, latitude, longitude}}]`
+  - **`recurrenceRules`**：JSON 字符串（frequency/interval/daysOfWeek 等）；读时勿当普通字符串拼接，简单判断可用，复杂场景用 `update --repeat`/`add --repeat` 重新生成
 
 ## Token 效率守则
 

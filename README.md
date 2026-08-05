@@ -47,6 +47,7 @@ remindkit complete <id>  # 完成
 - 完整层级写:列表文件夹→列表→分区→任务→子任务;含标签/旗标/紧急/智能列表/批量
 - 内置 skill:install 后自动注册,agent 扫描 `~/.agents/skills/` 自动发现
 - 全部命令与参数见 `remindkit <命令> --help`;agent 细则见 [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)
+- 支持边界逐项评估(✅ 完整 / 🟡 受限 / ❌ 不支持,如日常采购列表、模板、图片附件等)见 [docs/apple-reminders-support.md](docs/apple-reminders-support.md)
 
 ## 安全约定
 

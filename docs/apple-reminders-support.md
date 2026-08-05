@@ -1,5 +1,7 @@
 # remindkit × Apple Reminders 支持度评估
 
+> [English](apple-reminders-support.en.md)
+>
 > 评估 remindkit 对苹果「提醒事项」功能的支持程度。状态标注：
 > ✅ 完整支持 ｜ 🟡 部分/受限 ｜ ❌ 暂不支持
 >
@@ -14,6 +16,7 @@
 | 列表颜色 | ✅ | 读取 + `update-list --color`（12 色板） |
 | 分组（智能文件夹） | ✅ | **读**完整（`list --groups`、parentUUID 归属）；**写**：`add-group` 建、`add-list --group` 放入、`delete-list` 删（探索确认：分组=REMAccountGroupContext，无 REMGroup 类；苹果文件夹不支持嵌套，单层） |
 | 智能列表 | ✅ | **读**（smartLists 字段）；**写**：`add-smartlist [--color]`；删除可用 `delete-list` |
+| 日常采购列表（Grocery） | ❌ | 苹果 App 的「日常采购」列表（自动按类别分组商品：农产品/奶制品/烘焙等）依赖 ReminderKit 分类字段，**读不到分类分组、也建不了该类型列表**；只能当普通列表读（标题/商品仍可见，无类别分组） |
 | 列表分区（sections） | ✅ | **读**（`[N sections]`）；**写**：`add-section <list> <name>` 建分区；`add --section` / `update --section` 把提醒归入分区（REMMembership 路径） |
 | 列表排序 | 🟡 | 读取保持 display order；**写排序不支持** |
 
@@ -81,6 +84,7 @@
 | 跨设备同步 | — | 数据在 iCloud 天然同步；本工具只读本机 |
 | 协作/共享列表 | ❌ | 不支持 |
 | 模板（iOS 17+） | ❌ | 不支持 |
+| 日常采购分类 | ❌ | 见「一、列表层」：日常采购列表的分类分组读不到也建不了 |
 
 ## 六、已知局限（按影响排序）
 
@@ -88,7 +92,7 @@
 2. **EventKit 兜底降级**：子进程不可用时，tags/重复/旗标/紧急/分区/分组/智能列表不可写（响应标记 `degraded: true`）。
 3. **move ID 变化**：复制+删除实现，移动后引用需用返回的新 id。
 4. **子任务嵌套**：一层父子可用；更深嵌套未验证/不支持。
-5. **写端缺**：时区（触发 remindd 崩溃）、顺序、图片、消息提醒、模板、协作。
+5. **写端缺**：时区（触发 remindd 崩溃）、顺序、图片、消息提醒、模板、协作、日常采购列表（分类分组）。
 6. **子任务嵌套**：苹果框架原生报 `Nested subtasks is unsupported`，仅支持一层。
 
 ## 七、结论
