@@ -125,10 +125,14 @@ struct Bulk: ParsableCommand {
 
         // Execute per reminder, collecting per-item results.
         var ok = 0
+        var results: [[String: Any]] = []
         var failures: [[String: Any]] = []
         for r in selected {
             do {
-                _ = try executeOp(op: op, reminder: r)
+                var item = try executeOp(op: op, reminder: r)
+                item["id"] = r.id
+                item["title"] = r.title
+                results.append(item)
                 ok += 1
             } catch {
                 failures.append(["id": r.id, "title": r.title, "error": error.localizedDescription])
@@ -136,6 +140,7 @@ struct Bulk: ParsableCommand {
         }
 
         var out: [String: Any] = ["ok": true, "op": op, "selected": selected.count, "succeeded": ok, "failed": failures.count]
+        if !results.isEmpty { out["results"] = results }
         if !failures.isEmpty { out["failures"] = failures }
         try jsonOut(out)
     }
@@ -177,7 +182,16 @@ struct Bulk: ParsableCommand {
                 return ["to": target.title]
             }
             var dict: [String: Any] = ["source": source]
-            if let newId = result["newID"] { dict["newID"] = newId }
+            // move preserves the reminder's identifier (true re-parent via
+            // addReminderChangeItem: — no copy/delete, no new ID). Surface it
+            // so callers can keep tracking the moved reminder.
+            if let movedFromId = result["movedFromId"], let newId = result["id"] {
+                // compat: a stale subprocess binary still reports copy+delete
+                dict["movedFromId"] = movedFromId
+                dict["newID"] = newId
+            } else {
+                dict["newID"] = id
+            }
             return dict
         case "update":
             var request: [String: Any] = ["op": "update", "id": id, "author": "remindkit"]

@@ -213,8 +213,10 @@ c=[c for c in json.load(sys.stdin) if c['id']=='$LIST_A_ID'][0]
 print('ok' if c['title']=='$LIST_B' and c.get('color') else 'bad')")"
 
 # move within test lists (same list, forced through the move op)
+# True move re-parents the existing reminder — the identifier is preserved
+# (no copy/delete, no recently-deleted entry).
 MOVED=$("$BIN" move "$REM_ID" --to-id "$LIST_A_ID" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['id'])")
-check "move returns new id" "ok" "$(test -n "$MOVED" && echo ok || echo no)"
+check "move preserves id (no copy/delete)" "$REM_ID" "$MOVED"
 
 # delete → recently-deleted → restore round-trip
 "$BIN" delete "$MOVED" >/dev/null 2>&1

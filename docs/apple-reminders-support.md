@@ -53,7 +53,7 @@
 | 删除 | ✅ | 软删除 → 最近删除（30 天后系统清除） |
 | 最近删除查询 | 🟡 | `recently-deleted` 仅能列出 **remindkit 删的**（本地缓存）；App 里删的不可见 |
 | 恢复 | 🟡 | `restore` 同上，仅 remindkit 删的 |
-| 移动 | 🟡 | `move` = ReminderKit 复制+删除，**ID 会变**（响应给新 id） |
+| 移动 | ✅ | `move` 真移动（`addReminderChangeItem:` 改挂目标列表），**ID 保留**，子树/子任务一并移动 |
 | 批量 | ✅ | `bulk --op complete/delete/move/update` + 条件选择 + `--dry-run` + `--limit` |
 
 ## 四、视图层（对齐 App 一级入口）
@@ -90,7 +90,7 @@
 
 1. **最近删除恢复不完整**：只能恢复 remindkit 删的（本地 `deleted.json` 缓存）；App 里删的无法恢复。ReminderKit 无法枚举 marked-for-delete 对象所致。
 2. **EventKit 兜底降级**：子进程不可用时，tags/重复/旗标/紧急/分区/分组/智能列表不可写（响应标记 `degraded: true`）。
-3. **move ID 变化**：复制+删除实现，移动后引用需用返回的新 id。
+3. **move 保留 ID**：真移动（重新挂载到目标列表），不再复制+删除；移动后 ID 不变，可继续引用。
 4. **子任务嵌套**：一层父子可用；更深嵌套未验证/不支持。
 5. **写端缺**：时区（触发 remindd 崩溃）、顺序、图片、消息提醒、模板、协作、日常采购列表（分类分组）。
 6. **子任务嵌套**：苹果框架原生报 `Nested subtasks is unsupported`，仅支持一层。
@@ -99,4 +99,4 @@
 
 **读端 ≈ 100%**：苹果提醒事项的字段几乎全部可读（含子任务、位置、重复、时区、智能列表）。
 
-**写端覆盖全层级**：文件夹（`add-group`）→ 列表（`add-list [--group]`）→ 分区（`add-section` + `add/update --section`）→ 任务（`add`/`update`/`complete`）→ 子任务（`add --parent`）的完整层级写链路均已打通；日常使用（增删改查、完成、移动、批量、标签、旗标、紧急、提醒、位置、重复、智能列表创建）完整；缺口集中在低频/系统级功能（图片、模板、协作）和两个工程限制（最近删除、move ID）。
+**写端覆盖全层级**：文件夹（`add-group`）→ 列表（`add-list [--group]`）→ 分区（`add-section` + `add/update --section`）→ 任务（`add`/`update`/`complete`）→ 子任务（`add --parent`）的完整层级写链路均已打通；日常使用（增删改查、完成、移动、批量、标签、旗标、紧急、提醒、位置、重复、智能列表创建）完整；缺口集中在低频/系统级功能（图片、模板、协作）和工程限制（最近删除）。

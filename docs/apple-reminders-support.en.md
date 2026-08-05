@@ -53,7 +53,7 @@
 | Delete | ✅ | Soft delete → Recently Deleted (system purges after 30 days) |
 | Recently Deleted query | 🟡 | `recently-deleted` only lists what **remindkit deleted** (local cache); items deleted in the App are invisible |
 | Restore | 🟡 | `restore` same — only remindkit-deleted items |
-| Move | 🟡 | `move` = ReminderKit copy + delete, **ID changes** (response returns the new id) |
+| Move | ✅ | true re-parent via `addReminderChangeItem:` — **ID preserved**, whole subtree moves |
 | Batch | ✅ | `bulk --op complete/delete/move/update` + condition selection + `--dry-run` + `--limit` |
 
 ## 4. View layer (aligned with App first-class entries)
@@ -90,7 +90,7 @@
 
 1. **Incomplete Recently Deleted restore**: only remindkit-deleted items can be restored (local `deleted.json` cache); items deleted in the App cannot. ReminderKit cannot enumerate marked-for-delete objects.
 2. **EventKit fallback degradation**: when the subprocess is unavailable, tags/recurrence/flag/urgent/sections/groups/smart lists are not writable (response marks `degraded: true`).
-3. **move changes IDs**: copy+delete implementation; re-reference by the returned new id after moving.
+3. **move preserves IDs**: true re-parent (no copy+delete); keep referencing the same id after moving.
 4. **Subtask nesting**: one parent→child level works; deeper nesting unverified/unsupported.
 5. **Write-side gaps**: time zone (crashes remindd), order, images, message reminders, templates, collaboration, grocery lists (category grouping).
 6. **Subtask nesting**: Apple's framework natively errors with `Nested subtasks is unsupported` — one level only.

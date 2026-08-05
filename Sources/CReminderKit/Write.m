@@ -505,21 +505,76 @@ static NSDictionary *opMove(id store, NSDictionary *req) {
     NSDictionary *listErr = nil;
     id toList = resolveList(store, req[@"toListID"], toName, &listErr);
     if (!toList) return listErr;
+
+    // Collect the whole subtree (the reminder + every descendant via the
+    // parentReminderID chain). ReminderKit enforces that a subtask shares its
+    // parent's list, so moving a parent requires moving its entire subtree;
+    // saving a partial move fails with -3002 "Subtask has different list".
+    NSMutableArray *subtree = [NSMutableArray arrayWithObject:reminder];
+    NSMutableDictionary *childrenOf = [NSMutableDictionary dictionary];
+    {
+        NSMutableArray *listIDs = [NSMutableArray array];
+        void (^lb)(id, BOOL *) = ^(id list, BOOL *sp) {
+            id oid = [list valueForKey:@"objectID"];
+            if (oid) [listIDs addObject:oid];
+        };
+        ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), lb);
+        NSError *fe = nil;
+        NSArray *all = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
+            NSSelectorFromString(@"fetchRemindersForEventKitBridgingWithListIDs:error:"), listIDs, &fe);
+        for (id r in all) {
+            id pid = [r valueForKey:@"parentReminderID"];
+            if (!pid) continue;
+            NSString *key = [pid description];
+            if (!childrenOf[key]) childrenOf[key] = [NSMutableArray array];
+            [childrenOf[key] addObject:r];
+        }
+    }
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:reminder];
+    while (queue.count > 0) {
+        id cur = queue[0];
+        [queue removeObjectAtIndex:0];
+        NSArray *kids = childrenOf[[[cur valueForKey:@"objectID"] description]];
+        for (id kid in kids) {
+            if (![subtree containsObject:kid]) {
+                [subtree addObject:kid];
+                [queue addObject:kid];
+            }
+        }
+    }
+
+    // True move: attach the ORIGINAL change items to the target list.
+    // REMListChangeItem -addReminderChangeItem: re-parents the existing
+    // reminder (identifier preserved) instead of copying — unlike the old
+    // _copyReminderChangeItem:toListChangeItem: + removeFromList dance, which
+    // produced a NEW identifier and dropped the old reminder. Children attach
+    // to their parent's subtask context so parent/child links survive;
+    // ReminderKit then enforces same-list consistency across the subtree.
     id saveReq = makeSaveRequest(store, req[@"author"]);
-    id remCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateReminder:"), reminder);
     id listCI2 = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), toList);
-    // ReminderKit move = copy into target list + remove original; the copy
-    // gets a NEW identifier, so report it (the old id is gone).
-    id copyCI = ((id(*)(id, SEL, id, id))objc_msgSend)(saveReq,
-        NSSelectorFromString(@"_copyReminderChangeItem:toListChangeItem:"), remCI, listCI2);
-    ((void(*)(id, SEL))objc_msgSend)(remCI, NSSelectorFromString(@"removeFromList"));
+    NSMutableDictionary *parentCIByID = [NSMutableDictionary dictionary];
+    for (id r in subtree) {
+        id remCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateReminder:"), r);
+        NSString *key = [[r valueForKey:@"objectID"] description];
+        parentCIByID[key] = remCI;
+        if (r == reminder) {
+            ((void(*)(id, SEL, id))objc_msgSend)(listCI2, NSSelectorFromString(@"addReminderChangeItem:"), remCI);
+        } else {
+            id pid = [r valueForKey:@"parentReminderID"];
+            id parentCI = pid ? parentCIByID[[pid description]] : nil;
+            if (parentCI) {
+                id subCtx = ((id(*)(id, SEL))objc_msgSend)(parentCI, NSSelectorFromString(@"subtaskContext"));
+                ((void(*)(id, SEL, id))objc_msgSend)(subCtx, NSSelectorFromString(@"addReminderChangeItem:"), remCI);
+            } else {
+                ((void(*)(id, SEL, id))objc_msgSend)(listCI2, NSSelectorFromString(@"addReminderChangeItem:"), remCI);
+            }
+        }
+    }
     NSError *err = nil;
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-    id newId = copyCI ? ((id(*)(id, SEL))objc_msgSend)(copyCI, NSSelectorFromString(@"daCalendarItemUniqueIdentifier")) : nil;
-    // NB: toName may be nil when --to-id is used; a nil value in an NSDictionary
-    // literal raises NSInvalidArgumentException, so coalesce to "".
+    // True move keeps the identifier — no copy, no deletion, no recently-deleted entry.
     NSString *resolvedToName = [toList valueForKey:@"name"];
-    return @{@"ok": @YES, @"id": [newId isKindOfClass:[NSString class]] ? newId : extId, @"movedFromId": extId, @"toList": resolvedToName ?: toName ?: @""};
+    return @{@"ok": @YES, @"id": extId, @"toList": resolvedToName ?: toName ?: @""};
 }
 
 // MARK: - Entry
