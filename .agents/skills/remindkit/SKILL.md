@@ -47,6 +47,29 @@ allowed-tools:
 | 全量导出 | `remindkit dump > reminders.json` | 数据量大，谨慎；`dump.smartLists` 默认只含自定义（`type: custom`）；系统智能列表（今天/旗标/已完成/已分配）是虚拟视图、事项都在普通列表里，默认不输出，`dump --system-smartlists` 才包含；「计划」无实体，用 `scheduled` 命令 |
 | 权限诊断 | `remindkit doctor --for-agent --json` | 报错时最先跑 |
 
+## 数据结构：五层层级模型（先建心智模型，再动手）
+
+Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心设计的信息架构（领域模型）——分析前先读结构，别把列表当平铺数组逐条硬判**：
+
+```
+分组（Group，文件夹）              add-group / list --groups
+└─ 列表（List，含图标+备注 note）   list --format json（一次拿全：parentTitle 分组归属 + note + sections）
+   └─ 分区（Section，列表内分类）    query --list X --tree（或 --sections）
+      └─ 任务（Reminder）           query --list X [--tree] / --fields
+         └─ 子任务（Subtask）       同一列表内，parentId 指向父任务；query 输出 subtaskIds
+```
+
+- **分区 = 分类框架**：分区名（如视频/小红书/图文/运营）本身就是"什么条目属于此列表"的定义——判断某条目是否属于该列表，先看它落在哪个分区，再用分区语义定标准。
+- **列表备注 note = 领域模型**：`list --format json` 的 note 字段说明列表用途；分析前先读（`note --all` 也可）。
+- **杂项/兜底分区是重灾区**：无归属的分区（如「运营」「其他」）最容易混入不属于该列表的条目——分析时优先检查它们。
+- **智能列表（今天/旗标/已完成/已分配 + 自定义）是虚拟视图**：事项引用自普通列表，无层级结构。
+
+**分析结构化清单的流程（硬纪律）**：
+1. **先输出结构地图**：`list --format json`（全部列表+备注+分组）→ `query --list X --tree`（目标列表内部分区→任务→子任务树）
+2. **判断标准从结构里长出来**：用分区/备注定义的框架判断归属，不用通用业务逻辑硬套
+3. **平铺 JSON 只用于查证细节**：结构建立后，需要字段时才 `query --fields` 定向取（省 token）
+4. **杂项分区优先检查**（见上）
+
 ## 统一语义
 
 - 所有查询命令**默认只返回未完成**；`--completed` 只查已完成；`--all` 查全部（`--completed` 与 `--all` 互斥）。
