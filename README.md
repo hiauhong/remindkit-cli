@@ -36,6 +36,7 @@ remindkit                # 概览:今天/过期/未来/旗标/紧急
 remindkit today          # 今日到期
 remindkit overdue        # 已过期
 remindkit search "牛奶"   # 搜索
+remindkit search "牛奶 面包"   # 多关键词：任一命中（OR）；加 --match-all 全部命中（AND）
 remindkit add "买牛奶" --list 待办 --due "2026-08-03 09:00"
 remindkit complete <id>  # 完成
 ```

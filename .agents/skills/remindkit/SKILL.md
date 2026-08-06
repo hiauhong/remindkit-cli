@@ -37,7 +37,7 @@ allowed-tools:
 | 旗标（苹果一级入口「已标记」） | `remindkit flagged` | 对齐 App 侧边栏；支持 `--list`；agent 问"最近关注什么"用它 |
 | 紧急（苹果一级入口） | `remindkit urgent` | 同上 |
 | 计划（所有带日期的） | `remindkit scheduled [--within N] [--from D --to D]` | 对齐苹果「计划」视图：过期+今天+未来按日期排；`--within 7` = 未来 7 天；可与 `--flagged/--urgent/--list/--tag` 组合 |
-| 按标题/备注/标签搜索 | `remindkit search "<词>"` | 加 `--list` 限定列表 |
+| 按标题/备注/标签搜索 | `remindkit search "<词>"` | 多关键词空格分隔、任一命中（OR）；`--match-all` 全部命中（AND）；加 `--list` 限定列表 |
 | 标签视角（列出所有标签+计数） | `remindkit tags` | 默认未完成；`--all` 含已完成 |
 | 某个列表的提醒 | `remindkit query --list <名称或ID>` | 加 `--tag` / `--flagged` / `--urgent` 组合过滤 |
 | 到期日期区间 | `remindkit query --due-after 2026-08-01 --due-before 2026-09-01` | |

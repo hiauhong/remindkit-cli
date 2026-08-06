@@ -38,7 +38,9 @@ jobs:
         run: |
           ARCH="$(uname -m)"
           TARBALL="dist/remindkit-darwin-${ARCH}.tar.gz"
-          gh release create "$GITHUB_REF_NAME" "$TARBALL" --generate-notes
+          # Release notes are written manually: list new features &
+          # improvements, not a full commit changelog. No --generate-notes.
+          gh release create "$GITHUB_REF_NAME" "$TARBALL"
 
       - name: Update homebrew-tap formula
         env:
