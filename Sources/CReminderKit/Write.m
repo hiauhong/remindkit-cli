@@ -975,8 +975,10 @@ static NSDictionary *opDeleteSection(id store, NSDictionary *req) {
     if (!section) return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到分区：%@", name]};
 
     id oid = [section valueForKey:@"objectID"];
-    id sectionCI = ((id(*)(id, SEL, id, id, id))objc_msgSend)([NSClassFromString(@"REMListSectionChangeItem") alloc],
-        NSSelectorFromString(@"initWithObjectID:displayName:insertIntoListChangeItem:"), oid, name, listCI);
+    // 用 REMSaveRequest.updateListSection: 拿被正确跟踪的 change item（手动
+    // initWithObjectID:displayName:insertIntoListChangeItem: 构造的 item 是
+    // “新插入”语义，removeFromList 只会撤销插入，分区不会真删）。
+    id sectionCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateListSection:"), section);
     if (!sectionCI) return @{@"ok": @NO, @"error": @"创建分区 change item 失败"};
     ((void(*)(id, SEL))objc_msgSend)(sectionCI, NSSelectorFromString(@"removeFromList"));
 
