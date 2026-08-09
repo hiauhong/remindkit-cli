@@ -11,6 +11,9 @@ struct List: ParsableCommand {
     @Flag(name: .long, help: "Show groups only")
     var groups: Bool = false
 
+    @Flag(name: .long, help: "Compact structure for agent context: title/group/note/section names (no icons/counts)")
+    var brief: Bool = false
+
     @Option(name: .long, help: "Output format: json, plain, count")
     var format: QueryFormat = .auto()
 
@@ -19,6 +22,16 @@ struct List: ParsableCommand {
         let entries = data.calendars
 
         let filtered = groups ? entries.filter(\.isGroup) : entries
+
+        if brief {
+            // agent 上下文注入用：一次拿全归属决策所需结构（分组层级 + 分区名 + 备注），
+            // 无 icon/color/UUID/数量，体积最小化（~4KB）。
+            let notes = NotesStore(fileURL: NotesStore.defaultURL()).load()
+            for line in treeLines(entries, groupsOnly: false, notes: notes, showSectionNames: true) {
+                print(line)
+            }
+            return
+        }
 
         switch format {
         case .json:
@@ -58,7 +71,7 @@ struct List: ParsableCommand {
 /// indented indiscriminately and groups were printed at the end, which
 /// made group children look like they belonged to whatever list came
 /// before them.
-private func treeLines(_ calendars: [CalendarEntry], groupsOnly: Bool, notes: [String: String]) -> [String] {
+private func treeLines(_ calendars: [CalendarEntry], groupsOnly: Bool, notes: [String: String], showSectionNames: Bool = false) -> [String] {
     let groups = calendars.filter(\.isGroup)
     var lines: [String] = []
 
@@ -71,23 +84,28 @@ private func treeLines(_ calendars: [CalendarEntry], groupsOnly: Bool, notes: [S
 
     // Top-level lists (no parent group), in natural order.
     for e in calendars where !e.isGroup && e.parentUUID == nil {
-        lines.append(line(for: e, note: notes[e.id]))
+        lines.append(line(for: e, note: notes[e.id], showSectionNames: showSectionNames))
     }
     // Groups, each followed by its children (indented).
     for g in groups {
         lines.append(line(for: g, suffix: " 📁"))
         for child in calendars where child.parentUUID == g.id {
-            lines.append("  \(line(for: child, note: notes[child.id]))")
+            lines.append("  \(line(for: child, note: notes[child.id], showSectionNames: showSectionNames))")
         }
     }
     return lines
 }
 
-private func line(for e: CalendarEntry, suffix: String = "", note: String? = nil) -> String {
+private func line(for e: CalendarEntry, suffix: String = "", note: String? = nil, showSectionNames: Bool = false) -> String {
     let icon = e.icon ?? "📋"
-    let sections = (e.sections?.count ?? 0) > 0 ? " [\(e.sections!.count) sections]" : ""
+    let sectionsText: String
+    if showSectionNames, let s = e.sections, !s.isEmpty {
+        sectionsText = " 分区: \(s.joined(separator: "/"))"
+    } else {
+        sectionsText = (e.sections?.count ?? 0) > 0 ? " [\(e.sections!.count) sections]" : ""
+    }
     let noteText = note.map { "  (\($0))" } ?? ""
-    return "\(icon) \(e.title)\(suffix)\(sections)\(noteText)"
+    return "\(icon) \(e.title)\(suffix)\(sectionsText)\(noteText)"
 }
 
 /// JSON 输出模型：CalendarEntry + 分组名 + 备注（顶层列表 parentTitle 为 null）

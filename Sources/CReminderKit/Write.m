@@ -3,8 +3,6 @@
 
 // MARK: - Lookups
 
-static id findListByID(id store, NSString *uuidStr);  // forward decl
-
 // Hierarchy-write helpers (implemented after opUpdateList).
 static NSDictionary *fetchAllGroups(id store);
 static id resolveGroup(id store, NSString *groupID, NSString *groupName, NSDictionary **error);
@@ -22,42 +20,70 @@ static NSArray *findListsNamed(id store, NSString *name) {
     return matches;
 }
 
-/// Resolve a list by ID first, then by exact name. Detects ambiguous names and
-/// returns a structured error listing the candidate IDs (agent should use --id).
-static id resolveList(id store, NSString *listID, NSString *name, NSDictionary **error) {
-    if (listID.length > 0) {
-        id l = findListByID(store, listID);
-        if (!l) {
-            *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", listID]};
-            return nil;
-        }
-        return l;
-    }
-    NSArray *matches = findListsNamed(store, name);
-    if (matches.count > 1) {
-        NSMutableArray *ids = [NSMutableArray array];
-        for (id l in matches) {
-            NSString *u = extractUUID([l valueForKey:@"objectID"]);
-            if (u) [ids addObject:u];
-        }
-        *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:
-            @"列表名「%@」匹配到 %lu 个列表（名称重复），请用 --id 精确定位：%@",
-            name, (unsigned long)matches.count, [ids componentsJoinedByString:@", "]]};
-        return nil;
-    }
-    if (matches.count == 1) return matches[0];
-    *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", name]};
-    return nil;
-}
-
-static id findListByID(id store, NSString *uuidStr) {
-    __block id found = nil;
+/// Find lists matching a full UUID or an unambiguous ≥8-char UUID prefix.
+static NSArray *findListsByIDOrPrefix(id store, NSString *uuidStr) {
+    NSMutableArray *matches = [NSMutableArray array];
     void (^blk)(id, BOOL *) = ^(id list, BOOL *sp) {
         NSString *u = extractUUID([list valueForKey:@"objectID"]);
-        if (u && [u isEqualToString:uuidStr]) { found = [list retain]; *sp = YES; }
+        if (u && ([u isEqualToString:uuidStr] ||
+                  (uuidStr.length >= 8 && [u.lowercaseString hasPrefix:uuidStr.lowercaseString]))) {
+            [matches addObject:[list retain]];  // non-ARC: retain, caller releases
+        }
     };
     ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), blk);
-    return found;
+    return matches;
+}
+
+/// 候选列表描述：带分组归属，如「数码（理财消费）[B1D35ED8-…]」「数码（顶层）[18713335-…]」，
+/// 让 agent 一眼区分同名列表，无需再查分组。
+static NSString *describeListCandidates(id store, NSArray *lists) {
+    NSDictionary *groups = fetchGroups(store);
+    NSMutableArray *parts = [NSMutableArray array];
+    for (id l in lists) {
+        NSString *name = [[l valueForKey:@"name"] isKindOfClass:[NSString class]]
+            ? [l valueForKey:@"name"] : @"";
+        NSString *parentUUID = extractUUID([l valueForKey:@"parentListID"]);
+        NSString *groupName = parentUUID ? groups[parentUUID] : nil;
+        NSString *uuid = extractUUID([l valueForKey:@"objectID"]) ?: @"";
+        NSString *groupLabel = ([groupName isKindOfClass:[NSString class]] && groupName.length > 0)
+            ? groupName : @"顶层";
+        [parts addObject:[NSString stringWithFormat:@"%@（%@）[%@]", name, groupLabel, uuid]];
+    }
+    return [parts componentsJoinedByString:@", "];
+}
+
+/// Resolve a list: --list-id (or --list) 接受完整 UUID / ≥8 位前缀，--list 再按精确名称。
+/// 名称重名时返回结构化错误列出候选 ID（agent 用 --list-id 精确定位）。
+static id resolveList(id store, NSString *listID, NSString *name, NSDictionary **error) {
+    NSString *target = listID.length > 0 ? listID : name;
+    if (target.length > 0) {
+        NSArray *idMatches = findListsByIDOrPrefix(store, target);
+        if (idMatches.count == 1) return idMatches[0];
+        if (idMatches.count > 1) {
+            NSMutableArray *ids = [NSMutableArray array];
+            for (id l in idMatches) {
+                NSString *u = extractUUID([l valueForKey:@"objectID"]);
+                if (u) [ids addObject:u];
+            }
+            *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:
+                @"ID「%@」匹配到 %lu 个列表（ID 前缀重复），请用完整 UUID 精确定位：%@",
+                target, (unsigned long)idMatches.count, describeListCandidates(store, idMatches)]};
+            return nil;
+        }
+    }
+    // 仅按名称解析（显式 --list-id 不走名称匹配）
+    if (listID.length == 0 && name.length > 0) {
+        NSArray *matches = findListsNamed(store, name);
+        if (matches.count > 1) {
+            *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:
+                @"列表名「%@」匹配到 %lu 个列表（名称重复），请用 --list-id 精确定位：%@",
+                name, (unsigned long)matches.count, describeListCandidates(store, matches)]};
+            return nil;
+        }
+        if (matches.count == 1) return matches[0];
+    }
+    *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", target]};
+    return nil;
 }
 
 static id findReminderByExtId(id store, NSString *extId) {
@@ -298,7 +324,17 @@ static NSDictionary *opAdd(id store, NSDictionary *req) {
     NSError *err = nil;
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
     id newId = ((id(*)(id, SEL))objc_msgSend)(remCI, NSSelectorFromString(@"daCalendarItemUniqueIdentifier"));
-    return @{@"ok": @YES, @"id": [newId isKindOfClass:[NSString class]] ? newId : @""};
+    // 回显落点：listTitle + section，agent 无需再 query 验证
+    NSMutableDictionary *resp = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"ok": @YES,
+        @"id": [newId isKindOfClass:[NSString class]] ? newId : @"",
+        @"listTitle": ([[list valueForKey:@"name"] isKindOfClass:[NSString class]]
+                        ? [list valueForKey:@"name"] : @""),
+    }];
+    if ([sectionName isKindOfClass:[NSString class]] && sectionName.length > 0) {
+        resp[@"section"] = sectionName;
+    }
+    return resp;
 }
 
 static NSDictionary *opComplete(id store, NSDictionary *req) {
@@ -648,8 +684,11 @@ static NSDictionary *opDeleteList(id store, NSDictionary *req) {
     // 2) custom smart list: updateSmartList: -> removeFromParentWithAccountChangeItem:
     id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
     for (id sl in (NSArray *)smartLists) {
+        NSString *slUUID = extractUUID([sl valueForKey:@"objectID"]);
         BOOL nameMatch = ([name isKindOfClass:[NSString class]] && [[sl valueForKey:@"name"] isEqualToString:name]);
-        BOOL idMatch = (req[@"listID"] && [extractUUID([sl valueForKey:@"objectID"]) isEqualToString:req[@"listID"]]);
+        BOOL idMatch = (req[@"listID"] && slUUID &&
+                        ([slUUID isEqualToString:req[@"listID"]] ||
+                         ([req[@"listID"] length] >= 8 && [slUUID.lowercaseString hasPrefix:[req[@"listID"] lowercaseString]])));
         if (nameMatch || idMatch) {
             id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
             id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
@@ -678,7 +717,7 @@ static NSDictionary *opDeleteList(id store, NSDictionary *req) {
         }
     }
 
-    return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", name]};
+    return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", req[@"listID"] ?: (name ?: @"")]};
 }
 
 /// Update a regular list's name / icon / color.

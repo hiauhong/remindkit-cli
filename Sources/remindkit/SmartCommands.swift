@@ -40,20 +40,17 @@ struct Flagged: ParsableCommand {
     }
 
     func run() throws {
-        var q = Query()
-        q.flagged = true
-        q.urgent = false
-        q.list = list
-        q.tag = nil
-        q.completed = completed
-        q.all = all
-        q.dueAfter = nil
-        q.dueBefore = nil
-        q.format = format
-        q.fields = fields
-        q.sections = sections
-        q.noSections = noSections
-        try q.run()
+        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections, disable: noSections, hasList: list != nil))
+        var filtered = data.reminders
+        if let listFilter = list {
+            let calIds = Set(resolveListsOrFail(data.calendars, listFilter).map(\.id))
+            filtered = filtered.filter { calIds.contains($0.calendarId) }
+        }
+        filtered = try applyCompletionScope(filtered, completed: completed, all: all)
+        filtered = filtered.filter { $0.flagged }
+
+        try printReminderEntries(filtered, format: format, listNameById: calendarTitles(from: data.calendars),
+                                 fields: parseFieldsOption(fields))
     }
 }
 
@@ -91,19 +88,16 @@ struct Urgent: ParsableCommand {
     }
 
     func run() throws {
-        var q = Query()
-        q.urgent = true
-        q.flagged = false
-        q.list = list
-        q.tag = nil
-        q.completed = completed
-        q.all = all
-        q.dueAfter = nil
-        q.dueBefore = nil
-        q.format = format
-        q.fields = fields
-        q.sections = sections
-        q.noSections = noSections
-        try q.run()
+        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections, disable: noSections, hasList: list != nil))
+        var filtered = data.reminders
+        if let listFilter = list {
+            let calIds = Set(resolveListsOrFail(data.calendars, listFilter).map(\.id))
+            filtered = filtered.filter { calIds.contains($0.calendarId) }
+        }
+        filtered = try applyCompletionScope(filtered, completed: completed, all: all)
+        filtered = filtered.filter { $0.urgent }
+
+        try printReminderEntries(filtered, format: format, listNameById: calendarTitles(from: data.calendars),
+                                 fields: parseFieldsOption(fields))
     }
 }

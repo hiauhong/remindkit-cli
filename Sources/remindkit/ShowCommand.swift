@@ -11,6 +11,9 @@ struct Query: ParsableCommand {
     @Option(name: .long, help: "Filter by list name or ID")
     var list: String?
 
+    @Option(name: .long, help: "Filter by list ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
     @Option(name: .long, help: "Filter by tag name")
     var tag: String?
 
@@ -60,11 +63,22 @@ struct Query: ParsableCommand {
     }
 
     func run() throws {
-        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections || tree, disable: noSections, hasList: list != nil))
+        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections || tree, disable: noSections, hasList: list != nil || listId != nil))
 
         var filtered = data.reminders
 
-        if let listFilter = list {
+        if let listId {
+            let matches = data.calendars.filter { $0.id == listId || $0.id.lowercased().hasPrefix(listId.lowercased()) }
+            if matches.isEmpty {
+                fail("noSuchList", "找不到列表：\(listId)")
+            }
+            if matches.count > 1 {
+                let titles = matches.map(\.title).joined(separator: ", ")
+                fail("ambiguousList", "ID「\(listId)」匹配到 \(matches.count) 个列表（\(titles)），请用完整 UUID")
+            }
+            let calIds = Set(matches.map(\.id))
+            filtered = filtered.filter { calIds.contains($0.calendarId) }
+        } else if let listFilter = list {
             let calIds = Set(resolveListsOrFail(data.calendars, listFilter).map(\.id))
             filtered = filtered.filter { calIds.contains($0.calendarId) }
         }

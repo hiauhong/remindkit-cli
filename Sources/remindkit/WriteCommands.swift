@@ -100,6 +100,7 @@ private func reminderJSON(_ r: EKReminder) -> [String: Any] {
         "id": r.calendarItemIdentifier,
         "title": r.title ?? "",
         "calendar": r.calendar.title,
+        "listTitle": r.calendar.title,
         "calendarId": r.calendar.calendarIdentifier,
         "completed": r.isCompleted,
         "priority": r.priority,

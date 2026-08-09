@@ -106,13 +106,28 @@ func jsonCompatible<T: Encodable>(_ value: T) throws -> Any {
     return try JSONSerialization.jsonObject(with: data)
 }
 
+/// Identity/state core that is ALWAYS present in every reminder JSON, even
+/// under `--fields` projection. These are the fields downstream tooling relies
+/// on to route and act on a reminder (complete/flag/move/query by list), so a
+/// projection can never strip them — otherwise agents could silently misjudge
+/// completion state (e.g. `--fields id,title` hiding `completed`).
+let fixedReminderFields: Set<String> = [
+    "id", "calendarId", "title", "completed", "priority",
+    "allDay", "flagged", "urgent", "order", "subtaskIds",
+]
+
 /// Project a reminder to only the requested keys (unknown keys are ignored).
+/// The fixed identity/state fields are ALWAYS retained (see `fixedReminderFields`);
+/// `--fields` only selects which OPTIONAL fields are added on top.
 /// `listTitle` / `list` are resolved from the calendars map (not stored on the
 /// reminder itself), so list-aggregation queries don't need a full dump+join.
 func projectReminder(_ r: ReminderEntry, fields: [String], listNameById: [String: String] = [:]) throws -> [String: Any] {
     let dict = try jsonCompatible(r) as? [String: Any] ?? [:]
     guard !fields.isEmpty else { return dict }
     var out: [String: Any] = [:]
+    for f in fixedReminderFields {
+        if let v = dict[f] { out[f] = v }
+    }
     for f in fields where !f.isEmpty {
         if let v = dict[f] { out[f] = v }
     }

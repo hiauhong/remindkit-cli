@@ -98,11 +98,11 @@ print('ok' if len(d['reminders']) > 0 else 'empty')")"
 check "query --fields projects keys" "ok" "$("$BIN" query --all --fields id,title --format json 2>/dev/null | python3 -c "
 import json,sys
 rows=json.load(sys.stdin)
-print('ok' if rows and sorted(rows[0].keys()) == ['id', 'title'] else 'bad')")"
+print('ok' if rows and 'completed' in rows[0] and 'id' in rows[0] and 'title' in rows[0] and 'notes' not in rows[0] else 'bad')")" 
 check "dump --fields keeps top-level shape" "ok" "$("$BIN" dump --fields id,title 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-print('ok' if set(['version','reminders','calendars']) <= set(d.keys()) and d['reminders'] and set(d['reminders'][0].keys()) == set(['id','title']) else 'bad')")"
+print('ok' if set(['version','reminders','calendars']) <= set(d.keys()) and d['reminders'] and 'completed' in d['reminders'][0] and 'id' in d['reminders'][0] and 'title' in d['reminders'][0] and 'notes' not in d['reminders'][0] else 'bad')")" 
 
 # ── Hierarchy integrity (folder → list → section → reminder → subtask) ──────
 # Consistency checks on the full dump. They pass vacuously on an empty

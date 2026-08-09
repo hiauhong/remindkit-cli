@@ -298,7 +298,13 @@ func resolveListFilter(_ calendars: [CalendarEntry], _ filter: String) throws ->
 /// do/catch boilerplate while preserving the `noSuchList` error code.
 func resolveListsOrFail(_ calendars: [CalendarEntry], _ filter: String) -> [CalendarEntry] {
     do {
-        return try resolveListFilter(calendars, filter)
+        let resolved = try resolveListFilter(calendars, filter)
+        // 重名/前缀命中多个：明确警告，避免 agent 把合并输出误当单列表
+        if resolved.count > 1 {
+            let titles = resolved.map(\.title).joined(separator: ", ")
+            fputs("warning: --list \"\(filter)\" 匹配到 \(resolved.count) 个列表（\(titles)），输出为合并结果；如需精确定位用 --list <完整UUID> 或 --list-id\n", stderr)
+        }
+        return resolved
     } catch {
         fail(error)
     }

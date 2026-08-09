@@ -17,11 +17,19 @@ allowed-tools:
 
 用户说"今天/明天/过期"时，先用上面的值确定日期，再决定用 `today` / `overdue` / `query --due-before`。不要从训练数据猜今天是几号。
 
+## 当前列表结构（新增/归属路由先看这里，不必再跑 list）
+
+> **新增/移动/归属判断前，只跑一次 `remindkit list --brief`**（~4KB：分组层级 + 列表名 + 备注 + 分区名），输出即权威结构，直接据此选列表+分区。**不要**再逐个 query 候选列表的条目对比——note + 分区已足够决策。只有真模糊（两个列表都说得通）才允许查条目。
+
+!`remindkit list --brief`
+
+> 结构会随用户整理变化（增删列表/改备注/调分区），**每次需要时重新跑上面的命令**，不要依赖记忆或旧输出。
+
 ## 用户的使用约定（先读这里，再路由意图）
 
 > **约定文件 `~/.local/share/remindkit/conventions.md`（可用 `REMINDKIT_CONVENTIONS_FILE` 重定向，如放 iCloud Drive 跨设备同步）是可选的跨列表方法论侧车**（如旗标含义、inbox 列表）。它**不由 setup 生成**：需要时由 agent 在对话中向用户收集后写入，或用户手动编辑；普通用户不配置也能正常使用。
 
-> 每个列表的用途以 `note` 备注为准。**agent 用 `list --format json` 拿全量结构（含分组归属 parentTitle + 备注 note），用 `note --set` 非交互写入**，流程见下方「列表用途标注」。
+> 每个列表的用途以 `note` 备注为准。**agent 用 `list --brief` 拿归属决策结构（分组+备注+分区名）；`list --format json` 拿全量结构（含 UUID/icon/color/order）**，用 `note --set` 非交互写入，流程见下方「列表用途标注」。
 > ⚠️ **`setup` / `setup --deep` 是交互式确认向导，只有真人终端可用，agent 不运行**（非 TTY 直接报错退出）——agent 用 **`setup --accept`** 非交互保存候选备注（仅填空缺、不覆盖已有），或 `setup --status` 查状态。
 
 ## 意图路由
@@ -43,7 +51,8 @@ allowed-tools:
 | 到期日期区间 | `remindkit query --due-after 2026-08-01 --due-before 2026-09-01` | |
 | 数量统计（全局/按列表） | `remindkit count [--list X]` | 省 token 首选 |
 | 每个列表的统计表 | `remindkit count --by-list` | 一次拿到全部列表统计，勿循环 count |
-| 有哪些列表/群组/分区 | `remindkit list` / `remindkit list --groups` | |
+| 有哪些列表/群组/分区 | `remindkit list` / `remindkit list --groups` / `remindkit list --brief`（紧凑结构，含分区名+备注） | |
+| **新增提醒（先看结构再写）** | `remindkit list --brief` 定列表+分区 → `remindkit add "…" --list <标题或--list-id UUID> --section <分区>` | **add 响应自带 `listTitle`+`section` 回显，无需再验证 query**；重名列表用 `--list-id` 精确定位 |
 | 全量导出 | `remindkit dump > reminders.json` | 数据量大，谨慎；`dump.smartLists` 默认只含自定义（`type: custom`）；系统智能列表（今天/旗标/已完成/已分配）是虚拟视图、事项都在普通列表里，默认不输出，`dump --system-smartlists` 才包含；「计划」无实体，用 `scheduled` 命令 |
 | 权限诊断 | `remindkit doctor --for-agent --json` | 报错时最先跑 |
 
@@ -78,7 +87,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - **结构视图 `--tree`**：`query --list X --tree` 直接渲染「分区 → 任务 → 子任务」层级树（含父子缩进）——查列表内部结构用它，别从平铺 JSON 自己拼。
 - **输出格式自动切换**：终端（TTY）默认 `plain`，管道/agent 调用自动 `json`——agent 无需每次带 `--format json`；也可显式 `--format json|plain|count` 覆盖。
 - `count` 无完成态开关，始终显式输出 `{total, incomplete, completed, flagged, urgent, dueToday, overdue}`（默认 json，`--format plain` 给人看）。`count --by-list` 输出 `{total, incomplete, lists:[{id,title,icon,isGroup,parentTitle,total,…}]}`。
-- `--list` 解析顺序：完整 UUID → UUID 前缀（≥8 位）→ 精确标题（大小写不敏感）→ 子串；**匹配不到时报错退出**（见下），重名列表全部匹配并在 stderr 提示。
+- `--list` 解析：**读侧**（query/search/scheduled/count/bulk/smart）完整 UUID → UUID 前缀（≥8 位）→ 精确标题（大小写不敏感）→ 子串；重名**全部匹配合并输出 + stderr 警告**（避免误当单列表）；匹配不到报 `noSuchList`。**写侧**（add/update/move 等）完整 UUID → UUID 前缀（≥8 位）→ 精确标题，**不支持子串**（防误写）；重名报错并列出候选（**带分组归属**，如 `数码（理财消费）[UUID]`），提示用 `--list-id` 精确定位。`--list-id`（写侧 add/move 等 + 读侧 query）按 ID 精确定位，同名列表场景的首选。
 - **提醒字段语义（查询输出 JSON）**：输出是「固定核心 + 稀疏可选」混合——**固定字段永远在**（即使 false/0/[]），**可选字段有值才出现**（nil 直接省略 key，不输出 null）：
   - 固定（10）：`id`(UUID) `calendarId`(所属列表 UUID) `title` `completed` `priority` `allDay` `flagged` `urgent` `order`(列表内排序值) `subtaskIds`(`[]`=无子任务)
   - 可选（有值才出现）：`notes` `creationDate` `completionDate` `dueDate`(epoch) `dueDateText`(本地时区 yyyy-MM-dd HH:mm) `startDate` `timeZone` `recurrenceRules`(JSON 字符串) `tags` `url` `alarms` `section`(分区名) `parentId`(存在=是子任务，值=父提醒 UUID)
@@ -166,7 +175,7 @@ remindkit doctor --for-agent --json
 > **同名列表**：按名字操作遇到重名（如两个「工作」）会报歧义错误并列出候选 ID——此时必须改用 `--id`/`--list-id`/`--to-id` 精确定位。
 
 ```bash
-# 新建提醒（写走 ReminderKit 私有框架，EventKit 兜底；输出 JSON 含 source）
+# 新建提醒（写走 ReminderKit 私有框架，EventKit 兜底；输出 JSON 含 source + listTitle/section 回显，无需再验证）
 remindkit add "买牛奶" --list 测试列表 --due "2026-08-03 09:00" --priority high \
   --repeat weekly --days mon,wed --until 2026-12-31 --notes "备注" \
   --tag 购物 --tag 生活 --urgent --flagged --parent <父提醒ID> \
