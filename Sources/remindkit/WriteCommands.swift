@@ -1232,6 +1232,36 @@ struct AddSection: ParsableCommand {
     }
 }
 
+// MARK: - delete-section
+
+struct DeleteSection: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete-section",
+        abstract: "Delete a section from a list (reminders in it move to the un-sectioned area)"
+    )
+
+    @Argument(help: "List name or ID")
+    var list: String
+
+    @Argument(help: "Section name to delete")
+    var name: String
+
+    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
+    func run() throws {
+        guardWriteEnabled()
+        var request: [String: Any] = ["op": "deleteSection", "name": name, "author": "remindkit"]
+        if let listId { request["listID"] = listId } else { request["listName"] = list }
+        let (source, result) = try writeWithReminderKit(request) {
+            fail("unsupportedByEventKit", "EventKit 不支持分区（需要 ReminderKit 子进程）")
+        }
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
 // MARK: - add-smartlist
 
 struct AddSmartList: ParsableCommand {

@@ -943,6 +943,48 @@ static NSDictionary *opAddSection(id store, NSDictionary *req) {
              @"name": name, @"listID": extractUUID([list valueForKey:@"objectID"]) ?: @""};
 }
 
+/// Delete a section from a list. req: {op:deleteSection, listID?/listName,
+/// name, author}. Deleting a section removes the grouping itself; any
+/// reminders filed in it are moved to the list's un-sectioned area.
+static NSDictionary *opDeleteSection(id store, NSDictionary *req) {
+    NSString *name = req[@"name"];
+    if (![name isKindOfClass:[NSString class]] || name.length == 0) {
+        return @{@"ok": @NO, @"error": @"分区名不能为空"};
+    }
+    NSDictionary *listErr = nil;
+    id list = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
+    if (!list) return listErr;
+
+    NSError *err = nil;
+    id saveReq = makeSaveRequest(store, req[@"author"]);
+    id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), list);
+    id sectionCtx = [listCI valueForKey:@"sectionsContextChangeItem"];
+    if (!sectionCtx) return @{@"ok": @NO, @"error": @"列表不支持分区"};
+
+    // 拿现有分区（change item 上下文），按显示名匹配
+    id secs = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
+        NSSelectorFromString(@"fetchListSectionsForListSectionContextChangeItem:error:"), sectionCtx, &err);
+    if (![secs respondsToSelector:@selector(count)]) return @{@"ok": @NO, @"error": @"获取分区失败"};
+    NSInteger count = ((NSInteger(*)(id, SEL))objc_msgSend)(secs, @selector(count));
+    id section = nil;
+    for (NSInteger i = 0; i < count; i++) {
+        id secObj = ((id(*)(id, SEL, NSInteger))objc_msgSend)(secs, @selector(objectAtIndex:), i);
+        NSArray *names = parseSectionNames(secObj);
+        if (names.count > 0 && [names[0] isEqualToString:name]) { section = secObj; break; }
+    }
+    if (!section) return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到分区：%@", name]};
+
+    id oid = [section valueForKey:@"objectID"];
+    id sectionCI = ((id(*)(id, SEL, id, id, id))objc_msgSend)([NSClassFromString(@"REMListSectionChangeItem") alloc],
+        NSSelectorFromString(@"initWithObjectID:displayName:insertIntoListChangeItem:"), oid, name, listCI);
+    if (!sectionCI) return @{@"ok": @NO, @"error": @"创建分区 change item 失败"};
+    ((void(*)(id, SEL))objc_msgSend)(sectionCI, NSSelectorFromString(@"removeFromList"));
+
+    if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+    return @{@"ok": @YES, @"name": name,
+             @"listID": extractUUID([list valueForKey:@"objectID"]) ?: @""};
+}
+
 /// Create a custom smart list. req: {op:createSmartList, name, color?,
 /// displayName?, author}.
 static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
@@ -1053,6 +1095,7 @@ NSDictionary *executeWriteRequest(id store, NSDictionary *req) {
         if ([op isEqualToString:@"createGroup"]) return opCreateGroup(store, req);
         if ([op isEqualToString:@"createList"]) return opCreateList(store, req);
         if ([op isEqualToString:@"addSection"]) return opAddSection(store, req);
+        if ([op isEqualToString:@"deleteSection"]) return opDeleteSection(store, req);
         if ([op isEqualToString:@"createSmartList"]) return opCreateSmartList(store, req);
         if ([op isEqualToString:@"moveList"]) return opMoveList(store, req);
         return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"未知操作：%@", op]};
