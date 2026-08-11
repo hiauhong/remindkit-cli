@@ -54,6 +54,7 @@ allowed-tools:
 | 有哪些列表/群组/分区 | `remindkit list` / `remindkit list --groups` / `remindkit list --brief`（紧凑结构，含分区名+备注） | |
 | **新增提醒（先看结构再写）** | `remindkit list --brief` 定列表+分区 → `remindkit add "…" --list <标题或--list-id UUID> --section <分区>` | **add 响应自带 `listTitle`+`section` 回显，无需再验证 query**；重名列表用 `--list-id` 精确定位 |
 | 全量导出 | `remindkit dump > reminders.json` | 数据量大，谨慎；`dump.smartLists` 默认只含自定义（`type: custom`）；系统智能列表（今天/旗标/已完成/已分配）是虚拟视图、事项都在普通列表里，默认不输出，`dump --system-smartlists` 才包含；「计划」无实体，用 `scheduled` 命令 |
+| 调整列表内任务顺序 | `remindkit reorder <id> --before <同级ID>` / `--after` / `--first`（置顶） / `--last`（置底） | 相对移动，锚点须在同一列表；子任务不支持（v1） |
 | 权限诊断 | `remindkit doctor --for-agent --json` | 报错时最先跑 |
 
 ## 数据结构：五层层级模型（先建心智模型，再动手）
@@ -170,7 +171,7 @@ remindkit doctor --for-agent --json
 
 ## 写操作（谨慎使用）
 
-> **只读保护**：环境变量 `REMINDKIT_READ_ONLY=1` 时所有写命令（add/update/complete/delete/move/bulk/add-list/add-group/add-section/add-smartlist/delete-list/update-list/restore）拒绝执行，报 `{"error":{"code":"readOnly"}}`——agent 在只读场景（如纯查询会话）可设置它防误写。
+> **只读保护**：环境变量 `REMINDKIT_READ_ONLY=1` 时所有写命令（add/update/complete/delete/move/reorder/bulk/add-list/add-group/add-section/add-smartlist/delete-list/update-list/restore）拒绝执行，报 `{"error":{"code":"readOnly"}}`——agent 在只读场景（如纯查询会话）可设置它防误写。
 > **测试纪律（硬规则）**：写操作测试只能在**新建**的「测试冒烟*」列表/分组上做，自建自删（`make test` 的冒烟脚本会自建并自动删除，最后校验零残留）。**绝不直接对真实列表执行写测试**。
 > **同名列表**：按名字操作遇到重名（如两个「工作」）会报歧义错误并列出候选 ID——此时必须改用 `--id`/`--list-id`/`--to-id` 精确定位。
 
@@ -213,7 +214,11 @@ remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --notes "备�
   # 提醒：--alarm-at "YYYY-MM-DD HH:MM"(可重复)/--alarm-before N(--due 或当前 dueDate 为基准)/--location+经纬度
   # 至少指定一个字段或旗标；EventKit 兜底时 tags/repeat/flag/urgent/section 标记 degraded
 remindkit delete <id>          # 软删除 → 最近删除（30 天后系统清除）
-remindkit move <id> --to 测试列表2   # ReminderKit move=复制+删除，ID 会变（响应给新 id）
+remindkit move <id> --to 测试列表2   # 真移动：ID 保留、子树完整迁移（不复制不删、不进最近删除）
+remindkit reorder <id> --first          # 移到列表顶部
+remindkit reorder <id> --last           # 移到列表底部
+remindkit reorder <id> --before <同级提醒ID>   # 移到某提醒前面（锚点须同一列表）
+remindkit reorder <id> --after <同级提醒ID>    # 移到某提醒后面（锚点须同一列表）
 remindkit recently-deleted     # 查询最近删除（remindkit 删的，仍可恢复的）
 remindkit restore <id>         # 从最近删除恢复到原列表（ID 不变）
 

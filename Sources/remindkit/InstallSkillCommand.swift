@@ -136,4 +136,28 @@ struct InstallSkill: ParsableCommand {
         }
         return failures
     }
+
+    // MARK: - Auto-install on first run
+
+    /// 首次运行自动安装 agent skill（幂等）：检测到 `~/.agents/skills/remindkit`
+    /// 未安装时自动复制——brew 安装的用户无需手动 install-skill。
+    /// 关闭：环境变量 `REMINDKIT_NO_AUTO_SKILL=1`。失败静默（不阻塞主命令）。
+    /// 返回提示文本（nil = 已安装/无需提示/安装失败）。
+    static func autoInstallIfMissing() -> String? {
+        guard ProcessInfo.processInfo.environment["REMINDKIT_NO_AUTO_SKILL"] != "1" else { return nil }
+        let home = NSHomeDirectory()
+        let dest = URL(fileURLWithPath: home).appendingPathComponent(".agents/skills/remindkit")
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: dest.appendingPathComponent("SKILL.md").path) else { return nil }
+        let cmd = InstallSkill()
+        guard let source = cmd.findSkillSource() else { return nil }
+        if source.resolvingSymlinksInPath().path == dest.resolvingSymlinksInPath().path { return nil }
+        var installed: [String] = []
+        var failures: [String] = []
+        failures += (try? cmd.install(source: source, targets: [dest.path], force: false,
+                                      installed: &installed)) ?? ["auto install failed"]
+        guard failures.isEmpty, !installed.isEmpty else { return nil }
+        return "已自动安装 remindkit agent skill 到 \(dest.path)（agent 新会话生效；REMINDKIT_NO_AUTO_SKILL=1 关闭）"
+    }
 }
+

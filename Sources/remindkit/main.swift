@@ -1,5 +1,18 @@
 import ArgumentParser
+import Darwin
 import Foundation
+
+// brew 安装不自动装 agent skill → 首次运行检测到 ~/.agents/skills/remindkit 未安装时
+// 自动安装（幂等）。只在交互终端（TTY）打印提示，管道/agent 场景静默；
+// install-skill/--help/--version 跳过；REMINDKIT_NO_AUTO_SKILL=1 可关闭。
+let argv = CommandLine.arguments
+let isMetaInvocation = argv.contains("install-skill") || argv.contains("--help")
+    || argv.contains("-h") || argv.contains("--version")
+if !isMetaInvocation,
+   let note = InstallSkill.autoInstallIfMissing(),
+   isatty(STDERR_FILENO) != 0 {
+    FileHandle.standardError.write((note + "\n").data(using: .utf8)!)
+}
 
 RemindKit.main()
 
@@ -7,7 +20,7 @@ struct RemindKit: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "remindkit",
         abstract: "Apple Reminders data pipeline CLI",
-        subcommands: [Dump.self, List.self, Query.self, Today.self, Overdue.self, Scheduled.self, Flagged.self, Urgent.self, Search.self, Count.self, Tags.self, Overview.self, Doctor.self, InstallSkill.self, Note.self, Setup.self, Add.self, Complete.self, Delete.self, Move.self, Update.self, Bulk.self, AddList.self, AddGroup.self, AddSection.self, DeleteSection.self, AddSmartList.self, MoveList.self, RecentlyDeleted.self, Restore.self, DeleteList.self, UpdateList.self],
+        subcommands: [Dump.self, List.self, Query.self, Today.self, Overdue.self, Scheduled.self, Flagged.self, Urgent.self, Search.self, Count.self, Tags.self, Overview.self, Doctor.self, InstallSkill.self, Note.self, Setup.self, Add.self, Complete.self, Delete.self, Move.self, Reorder.self, Update.self, Bulk.self, AddList.self, AddGroup.self, AddSection.self, DeleteSection.self, AddSmartList.self, MoveList.self, RecentlyDeleted.self, Restore.self, DeleteList.self, UpdateList.self],
         defaultSubcommand: Overview.self
     )
 }

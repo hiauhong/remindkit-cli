@@ -42,6 +42,7 @@ List folder (group)                    ← add-group
 
 ```bash
 brew install hiauhong/tap/remindkit
+# First run auto-registers the agent skill (visible prompt on a terminal; REMINDKIT_NO_AUTO_SKILL=1 disables); Claude Code users add: remindkit install-skill --claude
 # or
 ./Scripts/install.sh     # auto-registers the agent skill after install
 ```
@@ -71,7 +72,7 @@ remindkit complete <id>  # complete
 - Query commands return **incomplete only** by default; `--all` / `--completed` toggle
 - JSON output by default; errors to stderr as JSON `{"error":{...}}` + exit codes (1 runtime / 64 usage)
 - Full write hierarchy: list folders → lists → sections → tasks → subtasks; incl. tags / flag / urgent / smart lists / batch
-- Bundled skill: auto-registered after install; agents scan `~/.agents/skills/` and auto-discover
+- Bundled skill: register manually with `remindkit install-skill` (**brew does not auto-register**); agents scan `~/.agents/skills/` and auto-discover
 - Full options: `remindkit <command> --help`; agent details in [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)
 - Support matrix (✅ full / 🟡 limited / ❌ not supported — e.g. grocery lists, templates, image attachments): [docs/apple-reminders-support.en.md](docs/apple-reminders-support.en.md)
 

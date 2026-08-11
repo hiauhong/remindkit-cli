@@ -240,6 +240,37 @@ print('ok' if not any(i['id']=='$MOVED' for i in items) else 'still-present')")"
 # lingers).
 sleep 2
 
+# ── reorder: 列表内相对移动（--before/--after/--first/--last）──────────
+# 锚点：新建一个同级提醒，让列表至少两个任务可排序。
+SIB=$("$BIN" add "冒烟排序锚点$TAG" --list-id "$LIST_A_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+check "reorder anchor add ok" "ok" "$(test -n "$SIB" && echo ok || echo no)"
+
+check "reorder --first ok" "ok" "$("$BIN" reorder "$REM_ID" --first | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('relation')=='before' else 'bad')")"
+check "reorder --before sibling ok" "ok" "$("$BIN" reorder "$REM_ID" --before "$SIB" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('relation')=='before' and d.get('sibling')=='冒烟排序锚点$TAG' else 'bad')")"
+check "reorder --after sibling ok" "ok" "$("$BIN" reorder "$REM_ID" --after "$SIB" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('relation')=='after' else 'bad')")"
+check "reorder --last ok" "ok" "$("$BIN" reorder "$REM_ID" --last | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('relation')=='after' else 'bad')")"
+
+# 顺序验证：--last 后 REMINDER 应排列表末尾（query 枚举顺序 = 显示顺序）
+OUT=$("$BIN" query --list-id "$LIST_A_ID" --fields title --format json)
+check "reorder --last moves reminder to bottom" "ok" "$(echo "$OUT" | python3 -c "
+import json,sys
+rows=[r['title'] for r in json.load(sys.stdin)]
+print('ok' if rows and rows[-1]=='$REMINDER' else 'bad: ' + ','.join(rows[-3:]))")"
+
+# 单任务 no-op：把锚点删掉，剩唯一任务，--first 应 unchanged
+"$BIN" delete "$SIB" >/dev/null 2>&1
+check "reorder single-task no-op (unchanged)" "ok" "$("$BIN" reorder "$REM_ID" --first | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('unchanged') else 'bad')")"
+
 # subprocess stderr must stay silent on success (no internal-log pollution)
 STDERR=$("$BIN" count 2>&1 >/dev/null)
 check "successful run leaves stderr clean" "" "$STDERR"

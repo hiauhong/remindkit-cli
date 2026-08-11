@@ -118,6 +118,21 @@ static NSString *listNameOfReminder(id reminder) {
     return [list valueForKey:@"name"];
 }
 
+/// Fetch every reminder (incl. subtasks) across all lists, flat. Used by
+/// reorder to map ordering objectIDs back to reminder objects.
+static NSArray *fetchAllReminderObjects(id store) {
+    NSMutableArray *listIDs = [NSMutableArray array];
+    void (^lb)(id, BOOL *) = ^(id list, BOOL *sp) {
+        id oid = [list valueForKey:@"objectID"];
+        if (oid) [listIDs addObject:oid];
+    };
+    ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), lb);
+    NSError *err = nil;
+    NSArray *reminders = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
+        NSSelectorFromString(@"fetchRemindersForEventKitBridgingWithListIDs:error:"), listIDs, &err);
+    return [reminders isKindOfClass:[NSArray class]] ? reminders : @[];
+}
+
 // MARK: - Save request plumbing
 
 static id makeSaveRequest(id store, NSString *author) {
@@ -1082,6 +1097,99 @@ static NSDictionary *opMoveList(id store, NSDictionary *req) {
     return out;
 }
 
+/// Reorder a reminder within its list. req: {op:reorder, id, before?/after?,
+/// first?, last?, author}. before/after 引用同列表的相邻提醒（by extId）；
+/// first/last 移到列表顶/底。底层 insertReminderChangeItem:before/after:
+/// （探索已验证：无分区/分区内/非 manual sortingStyle 均持久化；新列表默认
+/// sortingStyle=manual）。子任务 v1 拒绝（子任务顺序由父任务 subtaskContext
+/// 管理，不在列表 reminderIDsOrdering 里）。目标与锚点相同 → no-op 成功。
+static NSDictionary *opReorder(id store, NSDictionary *req) {
+    NSString *extId = req[@"id"];
+    id reminder = findReminderByExtId(store, extId);
+    if (!reminder) return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到提醒：%@", extId]};
+    if ([reminder valueForKey:@"parentReminderID"] != nil) {
+        return @{@"ok": @NO, @"error": @"子任务不支持排序（顺序由父任务管理）：请对父任务排序"};
+    }
+    NSString *before = req[@"before"];
+    NSString *after = req[@"after"];
+    BOOL first = [req[@"first"] boolValue];
+    BOOL last = [req[@"last"] boolValue];
+    int mode = (before.length > 0) + (after.length > 0) + first + last;
+    if (mode != 1) {
+        return @{@"ok": @NO, @"error": @"reorder 需要且仅需一个定位参数：--before <sibling> / --after <sibling> / --first / --last"};
+    }
+
+    id list = [reminder valueForKey:@"list"];
+    NSString *listName = [list valueForKey:@"name"] ?: @"";
+
+    // 锚点（sibling）解析：显式 --before/--after 按 extId 找；first/last 用
+    // 列表 reminderIDsOrdering 的第一个/最后一个顶层任务。
+    id sibling = nil;
+    NSString *relation = nil; // "before" | "after"
+    if (before.length > 0 || after.length > 0) {
+        NSString *sibExtId = before.length > 0 ? before : after;
+        relation = before.length > 0 ? @"before" : @"after";
+        sibling = findReminderByExtId(store, sibExtId);
+        if (!sibling) return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到相邻提醒：%@", sibExtId]};
+        id sibList = [sibling valueForKey:@"list"];
+        NSString *targetListUUID = extractUUID([list valueForKey:@"objectID"]);
+        NSString *sibListUUID = extractUUID([sibList valueForKey:@"objectID"]);
+        if (![targetListUUID isEqualToString:sibListUUID]) {
+            return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+                @"排序目标与相邻提醒不在同一列表：相邻提醒在「%@」",
+                [sibList valueForKey:@"name"] ?: @"未知列表"]};
+        }
+    } else {
+        id ordering = [list valueForKey:@"reminderIDsOrdering"];
+        if (![ordering respondsToSelector:@selector(firstObject)]) {
+            return @{@"ok": @NO, @"error": @"无法读取列表排序"};
+        }
+        id anchorOID = first
+            ? ((id(*)(id, SEL))objc_msgSend)(ordering, @selector(firstObject))
+            : ((id(*)(id, SEL))objc_msgSend)(ordering, @selector(lastObject));
+        relation = first ? @"before" : @"after";
+        if (!anchorOID) {
+            return @{@"ok": @NO, @"error": @"列表为空，无法定位排序位置"};
+        }
+        NSString *anchorUUID = extractUUID(anchorOID);
+        for (id r in fetchAllReminderObjects(store)) {
+            if ([extractUUID([r valueForKey:@"objectID"]) isEqualToString:anchorUUID]) {
+                sibling = r;
+                break;
+            }
+        }
+        if (!sibling) return @{@"ok": @NO, @"error": @"无法解析列表排序锚点（列表数据异常）"};
+    }
+
+    // 目标与锚点相同（单任务列表 --first/--last、或显式 --before 自己）→ no-op
+    NSString *targetUUID = extractUUID([reminder valueForKey:@"objectID"]);
+    NSString *sibUUID = extractUUID([sibling valueForKey:@"objectID"]);
+    if ([targetUUID isEqualToString:sibUUID]) {
+        return @{@"ok": @YES, @"id": extId,
+                 @"title": [reminder valueForKey:@"titleAsString"] ?: @"",
+                 @"listName": listName, @"relation": relation,
+                 @"sibling": [sibling valueForKey:@"titleAsString"] ?: @"",
+                 @"unchanged": @YES};
+    }
+
+    NSError *err = nil;
+    id saveReq = makeSaveRequest(store, req[@"author"]);
+    id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), list);
+    id remCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateReminder:"), reminder);
+    id sibCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateReminder:"), sibling);
+    NSString *sel = [relation isEqualToString:@"before"]
+        ? @"insertReminderChangeItem:beforeReminderChangeItem:"
+        : @"insertReminderChangeItem:afterReminderChangeItem:";
+    ((void(*)(id, SEL, id, id))objc_msgSend)(listCI, NSSelectorFromString(sel), remCI, sibCI);
+
+    if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+
+    return @{@"ok": @YES, @"id": extId,
+             @"title": [reminder valueForKey:@"titleAsString"] ?: @"",
+             @"listName": listName, @"relation": relation,
+             @"sibling": [sibling valueForKey:@"titleAsString"] ?: @""};
+}
+
 NSDictionary *executeWriteRequest(id store, NSDictionary *req) {
     NSString *op = req[@"op"];
     @try {
@@ -1090,6 +1198,7 @@ NSDictionary *executeWriteRequest(id store, NSDictionary *req) {
         if ([op isEqualToString:@"delete"]) return opDelete(store, req);
         if ([op isEqualToString:@"move"]) return opMove(store, req);
         if ([op isEqualToString:@"update"]) return opUpdate(store, req);
+        if ([op isEqualToString:@"reorder"]) return opReorder(store, req);
         if ([op isEqualToString:@"deleted"]) return opDeleted(store, req);
         if ([op isEqualToString:@"restore"]) return opRestore(store, req);
         if ([op isEqualToString:@"deleteList"]) return opDeleteList(store, req);
