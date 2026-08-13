@@ -271,6 +271,40 @@ check "reorder single-task no-op (unchanged)" "ok" "$("$BIN" reorder "$REM_ID" -
 import json,sys; d=json.load(sys.stdin)
 print('ok' if d.get('ok') and d.get('unchanged') else 'bad')")"
 
+# ── subtask: update --parent / --no-parent（普通任务 ↔ 子任务）─────
+# 全部在测试列表 LIST_A 内：REM_ID 为父任务，SUB 为普通任务；
+# 校验：自挂 / 父是子任务 / 已有子任务 / 跨列表（ReminderKit 强制同列表）。
+SUB=$("$BIN" add "冒烟子任务$TAG" --list-id "$LIST_A_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+check "subtask: add sub ok" "ok" "$(test -n "$SUB" && echo ok || echo no)"
+
+check "update --parent attaches subtask" "$REM_ID" "$("$BIN" update "$SUB" --parent "$REM_ID" | python3 -c "
+import json,sys; print(json.load(sys.stdin).get('changes', {}).get('parentId', ''))")"
+
+check "update --no-parent detaches" "null" "$("$BIN" update "$SUB" --no-parent | python3 -c "
+import json,sys
+v=json.load(sys.stdin).get('changes', {}).get('parentId')
+print('null' if v is None else v)")"
+
+SUB_ERR=$("$BIN" update "$SUB" --parent "$SUB" 2>&1 || true)
+check "subtask: self-attach rejected" "不能把提醒挂到自己下面" "$(echo "$SUB_ERR" | python3 -c "
+import json,sys; print(json.load(sys.stdin).get('error', {}).get('message', 'no-error'))")"
+
+"$BIN" update "$SUB" --parent "$REM_ID" >/dev/null 2>&1
+PAR_ERR=$("$BIN" update "$REM_ID" --parent "$SUB" 2>&1 || true)
+check "subtask: parent-is-subtask rejected" "父提醒本身是子任务——苹果不支持嵌套子任务，无法再挂" "$(echo "$PAR_ERR" | python3 -c "
+import json,sys; print(json.load(sys.stdin).get('error', {}).get('message', 'no-error'))")"
+
+# REM_ID 已有子任务 SUB → 不能再挂到其他父任务下（防 3 层嵌套）
+TOP=$("$BIN" add "冒烟顶层$TAG" --list-id "$LIST_A_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+CH_ERR=$("$BIN" update "$REM_ID" --parent "$TOP" 2>&1 || true)
+check "subtask: has-children rejected" "该提醒已有子任务——苹果不支持嵌套子任务（父→子→孙），无法再挂到父任务下" "$(echo "$CH_ERR" | python3 -c "
+import json,sys; print(json.load(sys.stdin).get('error', {}).get('message', 'no-error'))")"
+
+# 跨列表：父任务在另一个测试列表（组内列表），ReminderKit 强制同列表
+XL_ERR=$("$BIN" update "$SUB" --parent "$REM_IN_SECTION" 2>&1 || true)
+check "subtask: cross-list rejected" "父提醒在不同列表——请先 move 到同一列表再挂（ReminderKit 强制子任务与父同列表）" "$(echo "$XL_ERR" | python3 -c "
+import json,sys; print(json.load(sys.stdin).get('error', {}).get('message', 'no-error'))")"
+
 # subprocess stderr must stay silent on success (no internal-log pollution)
 STDERR=$("$BIN" count 2>&1 >/dev/null)
 check "successful run leaves stderr clean" "" "$STDERR"

@@ -213,6 +213,8 @@ remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --notes "备�
   # 更新字段：--title/--notes/--due/--start/--priority/--tag(可重复)/--url/--repeat/--days/--until/--section(移入分区)
   # 提醒：--alarm-at "YYYY-MM-DD HH:MM"(可重复)/--alarm-before N(--due 或当前 dueDate 为基准)/--location+经纬度
   # 至少指定一个字段或旗标；EventKit 兜底时 tags/repeat/flag/urgent/section 标记 degraded
+remindkit update <id> --parent <父提醒ID>   # 把普通任务挂为父任务的子任务（父须同列表、本身非子任务、无孙任务）
+remindkit update <id> --no-parent           # 解除父子关系（子任务变回普通任务，留在原列表）
 remindkit delete <id>          # 软删除 → 最近删除（30 天后系统清除）
 remindkit move <id> --to 测试列表2   # 真移动：ID 保留、子树完整迁移（不复制不删、不进最近删除）
 remindkit reorder <id> --first          # 移到列表顶部

@@ -24,11 +24,11 @@ List folder (group)                    ← add-group
  └── List (calendar)                   ← add-list --group
       ├── Section (macOS 26+)          ← add-section
       └── Task (reminder)              ← add --list / --section
-           └── Subtask (nests arbitrarily deep) ← add --parent <id>
+           └── Subtask (one level only, Apple-native limit) ← add --parent <id> / update --parent <id>
 ```
 
 - **Read**: `dump` / `list --groups` / `list --format json` output every level; fields map 1:1 — `isGroup` / `parentUUID` (folders), `sections`, `parentId` / `subtaskIds` (subtask tree)
-- **Write**: build top-down — `add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`; `move` re-parents between any levels
+- **Write**: build top-down — `add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`; `move` re-parents between any levels; `update --parent/--no-parent` attaches an existing task as a subtask / detaches it
 
 ## Features
 

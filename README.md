@@ -24,11 +24,11 @@ Apple Reminders 的五级数据层级，remindkit **读、写全部支持**—�
  └── 列表（list / calendar）                ← add-list --group
       ├── 分区（section，macOS 26+）        ← add-section
       └── 任务（task / reminder）           ← add --list / --section
-           └── 子任务（subtask，可嵌套任意深度）← add --parent <id>
+           └── 子任务（subtask，仅一层，苹果原生限制）← add --parent <id> / update --parent <id>
 ```
 
 - **读**：`dump` / `list --groups` / `list --format json` 全量输出层级关系，字段一一对应：`isGroup` / `parentUUID`（文件夹）、`sections`（分区）、`parentId` / `subtaskIds`（子任务树）
-- **写**：从顶层一路建到叶子——`add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`；`move` 可在任意层级间调整归属
+- **写**：从顶层一路建到叶子——`add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`；`move` 可在任意层级间调整归属；`update --parent/--no-parent` 把已有任务挂为/解除子任务
 
 ## 特性
 
@@ -42,7 +42,7 @@ Apple Reminders 的五级数据层级，remindkit **读、写全部支持**—�
 
 ```bash
 brew install hiauhong/tap/remindkit
-# 首次运行自动注册 agent skill（终端可见提示；REMINDKIT_NO_AUTO_SKILL=1 关闭）；Claude Code 用户补：remindkit install-skill --claude
+# 每次运行自动同步 agent skill（含更新；终端可见提示；REMINDKIT_NO_AUTO_SKILL=1 关闭）；Claude Code 用户补：remindkit install-skill --claude
 # 或
 ./Scripts/install.sh     # 装完自动注册 agent skill
 ```
@@ -73,7 +73,7 @@ remindkit complete <id>  # 完成
 - 查询默认只返回**未完成**;`--all` / `--completed` 切换
 - 默认 JSON 输出;错误为 stderr JSON `{"error":{...}}` + 退出码(1 运行时 / 64 用法)
 - 完整层级写:列表文件夹→列表→分区→任务→子任务;含标签/旗标/紧急/智能列表/批量
-- 内置 skill：`remindkit install-skill` 手动注册（**brew 安装不会自动注册**）；agent 扫描 `~/.agents/skills/` 自动发现
+- 内置 skill：`remindkit install-skill` 手动注册；**每次运行自动同步 `~/.agents/skills/` 副本**（缺失安装、内容不一致更新，agent 新会话生效）
 - 全部命令与参数见 `remindkit <命令> --help`;agent 细则见 [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)
 - 支持边界逐项评估(✅ 完整 / 🟡 受限 / ❌ 不支持,如日常采购列表、模板、图片附件等)见 [docs/apple-reminders-support.md](docs/apple-reminders-support.md)
 

@@ -2,9 +2,10 @@ import ArgumentParser
 import Darwin
 import Foundation
 
-// brew 安装不自动装 agent skill → 首次运行检测到 ~/.agents/skills/remindkit 未安装时
-// 自动安装（幂等）。只在交互终端（TTY）打印提示，管道/agent 场景静默；
-// install-skill/--help/--version 跳过；REMINDKIT_NO_AUTO_SKILL=1 可关闭。
+// 每次运行自动同步 agent skill（幂等）：~/.agents/skills/remindkit 缺失时自动安装，
+// 内容与源不一致时自动更新（brew upgrade 后 skill 随版本同步）。只在交互终端（TTY）
+// 打印提示，管道/agent 场景静默；install-skill/--help/--version 跳过；
+// REMINDKIT_NO_AUTO_SKILL=1 可关闭。
 let argv = CommandLine.arguments
 let isMetaInvocation = argv.contains("install-skill") || argv.contains("--help")
     || argv.contains("-h") || argv.contains("--version")

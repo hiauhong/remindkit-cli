@@ -177,7 +177,8 @@ static NSDateComponents *epochToComponents(NSNumber *epoch) {
 
 // MARK: - Operations
 
-static void applyEditableFields(id store, id reminder, id remCI, NSDictionary *req, NSMutableDictionary *changes);
+static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDictionary *req, NSMutableDictionary *changes);
+static BOOL reminderHasChildren(id store, id reminder);
 
 static NSDictionary *opAdd(id store, NSDictionary *req) {
     NSString *listName = req[@"listName"];
@@ -373,7 +374,8 @@ static NSDictionary *opUpdate(id store, NSDictionary *req) {
     id saveReq = makeSaveRequest(store, req[@"author"]);
     id remCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateReminder:"), reminder);
     NSMutableDictionary *changes = [NSMutableDictionary dictionary];
-    applyEditableFields(store, reminder, remCI, req, changes);
+    NSDictionary *fieldErr = applyEditableFields(store, reminder, remCI, req, changes);
+    if (fieldErr) return fieldErr;
     NSString *sectionName = req[@"section"];
     NSDictionary *secErr = nil;
     if ([sectionName isKindOfClass:[NSString class]] && sectionName.length > 0) {
@@ -387,9 +389,31 @@ static NSDictionary *opUpdate(id store, NSDictionary *req) {
     return @{@"ok": @YES, @"id": extId, @"changes": changes};
 }
 
+/// Whether the reminder has any subtasks (parentReminderID == its objectID).
+/// Requires a full fetch (enumerateAllRemindersWithBlock: silently drops subtasks).
+static BOOL reminderHasChildren(id store, id reminder) {
+    NSMutableArray *listIDs = [NSMutableArray array];
+    void (^lb)(id, BOOL *) = ^(id list, BOOL *sp) {
+        id oid = [list valueForKey:@"objectID"];
+        if (oid) [listIDs addObject:oid];
+    };
+    ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), lb);
+    NSError *err = nil;
+    NSArray *all = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
+        NSSelectorFromString(@"fetchRemindersForEventKitBridgingWithListIDs:error:"), listIDs, &err);
+    if (![all isKindOfClass:[NSArray class]]) return NO;
+    NSString *selfOID = [[reminder valueForKey:@"objectID"] description];
+    for (id r in all) {
+        id pid = [r valueForKey:@"parentReminderID"];
+        if (pid && [[pid description] isEqualToString:selfOID]) return YES;
+    }
+    return NO;
+}
+
 // Apply editable fields to an existing reminder's change item. Mirrors
 // opAdd's field logic; shared by opUpdate so both paths stay in sync.
-static void applyEditableFields(id store, id reminder, id remCI, NSDictionary *req, NSMutableDictionary *changes) {
+// Returns nil on success, or an error dict to abort the save.
+static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDictionary *req, NSMutableDictionary *changes) {
     if ([req[@"title"] isKindOfClass:[NSString class]]) {
         [remCI setValue:req[@"title"] forKey:@"titleAsString"];
         changes[@"title"] = req[@"title"];
@@ -532,6 +556,47 @@ static void applyEditableFields(id store, id reminder, id remCI, NSDictionary *r
         }
         changes[@"alarms"] = @(alarms.count);
     }
+
+    // --parent: attach this reminder as a subtask of another reminder.
+    // --no-parent: detach (make it a top-level task again).
+    NSString *parentId = req[@"parentId"];
+    if ([parentId isKindOfClass:[NSString class]] && parentId.length > 0) {
+        id parent = findReminderByExtId(store, parentId);
+        if (!parent) return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到父提醒：%@", parentId]};
+        NSString *selfExt = extractUUID([reminder valueForKey:@"objectID"]);
+        NSString *parentExt = extractUUID([parent valueForKey:@"objectID"]);
+        if (selfExt && parentExt && [selfExt isEqualToString:parentExt]) {
+            return @{@"ok": @NO, @"error": @"不能把提醒挂到自己下面"};
+        }
+        if ([parent valueForKey:@"parentReminderID"] != nil) {
+            return @{@"ok": @NO, @"error": @"父提醒本身是子任务——苹果不支持嵌套子任务，无法再挂"};
+        }
+        // ReminderKit enforces that a subtask shares its parent's list (-3002).
+        id selfList = [reminder valueForKey:@"list"];
+        id parentList = [parent valueForKey:@"list"];
+        if (selfList && parentList) {
+            NSString *selfListID = extractUUID([selfList valueForKey:@"objectID"]);
+            NSString *parentListID = extractUUID([parentList valueForKey:@"objectID"]);
+            if (selfListID && parentListID && ![selfListID isEqualToString:parentListID]) {
+                return @{@"ok": @NO, @"error": @"父提醒在不同列表——请先 move 到同一列表再挂（ReminderKit 强制子任务与父同列表）"};
+            }
+        }
+        // Apple supports only one level of parent→child; attaching a reminder
+        // that already has children would create a 3-level chain — reject.
+        if (reminderHasChildren(store, reminder)) {
+            return @{@"ok": @NO, @"error": @"该提醒已有子任务——苹果不支持嵌套子任务（父→子→孙），无法再挂到父任务下"};
+        }
+        [remCI setValue:[parent valueForKey:@"objectID"] forKey:@"parentReminderID"];
+        changes[@"parentId"] = parentExt ?: parentId;
+    }
+    if ([req[@"noParent"] boolValue]) {
+        if ([reminder valueForKey:@"parentReminderID"] == nil) {
+            return @{@"ok": @NO, @"error": @"该提醒不是子任务，无需解除"};
+        }
+        [remCI setValue:nil forKey:@"parentReminderID"];
+        changes[@"parentId"] = [NSNull null];
+    }
+    return nil;
 }
 
 static NSDictionary *opDelete(id store, NSDictionary *req) {

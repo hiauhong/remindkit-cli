@@ -823,6 +823,12 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "Set an absolute alarm (YYYY-MM-DD HH:MM, repeatable)")
     var alarmAt: [String] = []
 
+    @Option(name: .long, help: "Parent reminder ID (attach this reminder as a subtask; parent must be in the same list and itself not a subtask)")
+    var parent: String?
+
+    @Flag(name: .long, help: "Detach from its parent (make this reminder a top-level task)")
+    var noParent: Bool = false
+
     @Option(name: .long, help: "Move to a section (must exist in the list; use add-section first)")
     var section: String?
 
@@ -860,10 +866,13 @@ struct Update: ParsableCommand {
         if urgent && noUrgent {
             throw ValidationError("--urgent and --no-urgent are mutually exclusive")
         }
+        if parent != nil && noParent {
+            throw ValidationError("--parent and --no-parent are mutually exclusive")
+        }
         if title == nil && notes == nil && notesAppend == nil && due == nil && start == nil && priority == nil
             && tag.isEmpty && url == nil && repeatRule == nil && until == nil
             && alarmAt.isEmpty && alarmBefore == nil && location == nil
-            && !flag && !noFlag && !urgent && !noUrgent && section == nil {
+            && !flag && !noFlag && !urgent && !noUrgent && section == nil && parent == nil && !noParent {
             throw ValidationError("specify at least one field or flag to update")
         }
     }
@@ -900,6 +909,8 @@ struct Update: ParsableCommand {
         if urgent { request["urgent"] = true }
         if noUrgent { request["urgent"] = false }
         if let section, !section.isEmpty { request["section"] = section }
+        if let parent, !parent.isEmpty { request["parentId"] = parent }
+        if noParent { request["noParent"] = true }
 
         // --alarm-before 基准：本次显式 --due 优先，否则用提醒当前 dueDate。
         var alarmDueEpoch = dueRequested
@@ -928,7 +939,8 @@ struct Update: ParsableCommand {
                 priority: priority.flatMap { try? parsePriority($0) }
             )
             var dict = reminderJSON(reminder)
-            if !tag.isEmpty || repeatRule != nil || flag || noFlag || urgent || noUrgent || section != nil {
+            if !tag.isEmpty || repeatRule != nil || flag || noFlag || urgent || noUrgent || section != nil
+                || parent != nil || noParent {
                 dict["degraded"] = true
             }
             return dict

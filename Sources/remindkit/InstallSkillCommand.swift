@@ -137,26 +137,42 @@ struct InstallSkill: ParsableCommand {
         return failures
     }
 
-    // MARK: - Auto-install on first run
+    // MARK: - Auto-sync on run
 
-    /// 首次运行自动安装 agent skill（幂等）：检测到 `~/.agents/skills/remindkit`
-    /// 未安装时自动复制——brew 安装的用户无需手动 install-skill。
+    /// 每次运行自动同步 agent skill（幂等）：`~/.agents/skills/remindkit` 缺失时
+    /// 安装；已存在但内容与源不一致时覆盖更新（brew upgrade 后 skill 随版本自动同步，
+    /// agent 无需手动 install-skill --force）。内容一致时零开销跳过。
     /// 关闭：环境变量 `REMINDKIT_NO_AUTO_SKILL=1`。失败静默（不阻塞主命令）。
-    /// 返回提示文本（nil = 已安装/无需提示/安装失败）。
+    /// 返回提示文本（nil = 已同步/无需提示/安装失败）。
     static func autoInstallIfMissing() -> String? {
         guard ProcessInfo.processInfo.environment["REMINDKIT_NO_AUTO_SKILL"] != "1" else { return nil }
         let home = NSHomeDirectory()
         let dest = URL(fileURLWithPath: home).appendingPathComponent(".agents/skills/remindkit")
+        let destSkill = dest.appendingPathComponent("SKILL.md")
         let fm = FileManager.default
-        guard !fm.fileExists(atPath: dest.appendingPathComponent("SKILL.md").path) else { return nil }
         let cmd = InstallSkill()
         guard let source = cmd.findSkillSource() else { return nil }
         if source.resolvingSymlinksInPath().path == dest.resolvingSymlinksInPath().path { return nil }
+        let sourceSkill = source.appendingPathComponent("SKILL.md")
+
+        // 已安装且内容一致 → 无需任何操作。
+        if fm.fileExists(atPath: destSkill.path),
+           let srcData = try? Data(contentsOf: sourceSkill),
+           let dstData = try? Data(contentsOf: destSkill),
+           srcData == dstData {
+            return nil
+        }
+
+        // 缺失 → 安装；存在但内容不一致 → 覆盖更新（skill 是发行契约，随版本同步）。
+        let wasInstalled = fm.fileExists(atPath: destSkill.path)
         var installed: [String] = []
         var failures: [String] = []
-        failures += (try? cmd.install(source: source, targets: [dest.path], force: false,
+        failures += (try? cmd.install(source: source, targets: [dest.path], force: wasInstalled,
                                       installed: &installed)) ?? ["auto install failed"]
         guard failures.isEmpty, !installed.isEmpty else { return nil }
+        if wasInstalled {
+            return "已自动更新 remindkit agent skill（内容已同步到当前版本；若你手动改过可用 REMINDKIT_NO_AUTO_SKILL=1 关闭）"
+        }
         return "已自动安装 remindkit agent skill 到 \(dest.path)（agent 新会话生效；REMINDKIT_NO_AUTO_SKILL=1 关闭）"
     }
 }
