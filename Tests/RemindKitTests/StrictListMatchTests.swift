@@ -3,7 +3,7 @@ import XCTest
 
 /// 安全关键逻辑：EventKit fallback 的列表解析必须严格（完整 ID → UUID 前缀
 /// → 精确标题），**禁止子串匹配**——`工作` 绝不能解析到 `工作备份`。
-/// REVIEW.md #1 的回归测试。
+/// 回归测试：写路径列表解析严格化（去子串匹配）。
 final class StrictListMatchTests: XCTestCase {
 
     private let ids = [
