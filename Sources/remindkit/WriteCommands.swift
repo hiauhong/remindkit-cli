@@ -26,24 +26,38 @@ func failReminderKitError(_ rk: [String: Any]) -> Never {
 }
 
 /// Try the ReminderKit subprocess first; fall back to EventKit ONLY when the
-/// subprocess is unavailable (binary missing / crashed / no output). A
-/// business error from the subprocess (ambiguous name, not found, write
-/// protection) surfaces as the structured error contract — falling back would
-/// silently operate on the wrong list or fail the same way.
+/// subprocess is *unavailable* (binary missing / failed to start). A business
+/// error from the subprocess (ambiguous name, not found, write protection)
+/// surfaces as the structured error contract — falling back would silently
+/// operate on the wrong list or fail the same way. An unknown write outcome
+/// (timeout / no output) NEVER falls back: the subprocess may have committed
+/// the write, and retrying through EventKit could duplicate or double-apply it.
 func writeWithReminderKit(_ request: [String: Any],
                           fallback: () throws -> [String: Any]) throws -> (source: String, result: [String: Any]) {
-    if let rk = runReminderKitWrite(request) {
+    switch runReminderKitWrite(request) {
+    case .success(let rk):
         if let ok = rk["ok"] as? Bool, ok {
             return ("reminderKit", rk)
         }
         failReminderKitError(rk)
+    case .unavailable:
+        return ("eventKit", try fallback())
+    case .unknownOutcome(let detail):
+        fail("writeResultUnknown",
+             "写操作结果未知：\(detail)。为避免重复写入，已中止而不走 EventKit 兜底；请用 query/dump 核对后再操作。")
     }
-    return ("eventKit", try fallback())
 }
 
-/// Resolve a list by exact name or ID (EventKit fallback side).
+/// Resolve a list by exact name or ID (EventKit fallback side). Strict:
+/// full ID → UUID prefix → case-insensitive exact title; multiple matches
+/// (duplicate titles) fail with `ambiguousList` — never pick one arbitrarily.
 func ekResolveList(_ nameOrID: String, writer: RemindersWriter) throws -> EKCalendar {
-    guard let cal = writer.calendar(namedOrID: nameOrID) else {
+    let matches = writer.resolveCalendars(namedOrID: nameOrID)
+    if matches.count > 1 {
+        let titles = matches.map(\.title).joined(separator: ", ")
+        fail("ambiguousList", "「\(nameOrID)」匹配到 \(matches.count) 个列表（\(titles)），请用完整列表 ID 精确定位")
+    }
+    guard let cal = matches.first else {
         fail("noSuchList", "找不到列表：\(nameOrID)")
     }
     return cal
@@ -162,6 +176,12 @@ private let dayMap: [String: Int] = [
     "thu": 5, "fri": 6, "sat": 7,
 ]
 
+/// 优先级映射（对照真实 Reminders 数据确认，2026-08）：
+///   none=0, low=1, medium=5, high=9
+/// 注意：Apple 的 EKReminder.priority 文档措辞是「1 = highest, 9 = lowest」，
+/// 但 Reminders.app 实际存储（REMCDReminder.priority）与 iCloud 同步值用的是
+/// 反过来的 9=high / 5=medium / 1=low / 0=none（pyremindkit 等实测封装均按此
+/// 修正过）。本 CLI 读写都走同一原始值，故按真实约定映射。
 private func parsePriority(_ value: String?) throws -> Int {
     guard let value else { return 0 }
     switch value.lowercased() {
@@ -250,7 +270,7 @@ private func parseRecurrenceDict(repeat: String?, every: Int, days: String?, unt
 struct Add: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "add",
-        abstract: "Create a reminder in a test list (ReminderKit write, EventKit fallback)"
+        abstract: "Create a reminder in a list (ReminderKit write, EventKit fallback)"
     )
 
     @Argument(help: "Reminder title")
@@ -470,7 +490,7 @@ struct Add: ParsableCommand {
         if let recurrence { request["recurrence"] = recurrence }
         if let url, !url.isEmpty { request["url"] = url }
 
-        var alarms = try buildAlarms(alarmAt: alarmAt, alarmBefore: alarmBefore, location: location,
+        let alarms = try buildAlarms(alarmAt: alarmAt, alarmBefore: alarmBefore, location: location,
                                      latitude: latitude, longitude: longitude, proximity: proximity,
                                      dueEpoch: dueEpoch)
         if !alarms.isEmpty { request["alarms"] = alarms }
@@ -480,15 +500,8 @@ struct Add: ParsableCommand {
             // not writable via EventKit → degrade with a warning).
             let store = RemindersAuth.requestAccessSync()
             let writer = RemindersWriter(store: store)
-            let calendar: EKCalendar
-            if let listId {
-                guard let cal = writer.calendar(namedOrID: listId) else {
-                    fail("noSuchList", "找不到目标列表：\(listId)")
-                }
-                calendar = cal
-            } else {
-                calendar = try ekResolveList(list ?? "", writer: writer)
-            }
+            // listId 优先；name/id 都走严格解析（重名/前缀冲突报 ambiguousList）
+            let calendar = try ekResolveList(listId ?? list ?? "", writer: writer)
 
             let hasTime = effectiveDue?.contains(":") == true
             let ekReminder = try writer.add(
@@ -501,7 +514,10 @@ struct Add: ParsableCommand {
                 recurrence: try parseRecurrenceRule(repeat: repeatRule, every: every, days: days, until: until)
             )
             var degraded = false
-            if urgent || flagged || !tag.isEmpty || parent != nil || section != nil { degraded = true }
+            if urgent || flagged || !tag.isEmpty || parent != nil || section != nil
+                || url != nil || !alarmAt.isEmpty || alarmBefore != nil || location != nil {
+                degraded = true
+            }
             var dict = reminderJSON(ekReminder)
             if degraded { dict["degraded"] = true }
             return dict
@@ -595,7 +611,7 @@ private func nextOccurrenceAfterComplete(id: String) -> (epoch: Double, text: St
     let data = fetchEnrichedData()
     guard let r = data.reminders.first(where: { $0.id == id }) else { return nil }
     guard !r.completed, let due = r.dueDate else { return nil }
-    return (due, reminderDateText(due) ?? "")
+    return (due, reminderDateText(due, timeZone: r.timeZone) ?? "")
 }
 
 // MARK: - Recently-deleted cache
@@ -623,8 +639,10 @@ private func deletedCacheURL() -> URL {
 
 private func loadDeletedCache() -> [DeletedRecord] {
     let url = deletedCacheURL()
-    guard let data = try? Data(contentsOf: url),
-          let records = try? JSONDecoder().decode([DeletedRecord].self, from: data) else {
+    guard let data = try? Data(contentsOf: url) else { return [] }
+    guard let records = try? JSONDecoder().decode([DeletedRecord].self, from: data) else {
+        // 损坏的 deleted.json 不能静默当空：备份后再返回空，避免覆盖真实记录。
+        backupCorruptFile(url, label: "deleted.json")
         return []
     }
     return records
@@ -633,8 +651,18 @@ private func loadDeletedCache() -> [DeletedRecord] {
 private func saveDeletedCache(_ records: [DeletedRecord]) {
     let url = deletedCacheURL()
     try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    if let data = try? JSONEncoder().encode(records) {
-        try? data.write(to: url)
+    guard let data = try? JSONEncoder().encode(records) else { return }
+    // 原子写（唯一 tmp + replace）：崩溃不损坏 deleted.json。
+    let tmp = uniqueTempURL(for: url)
+    do {
+        try data.write(to: tmp)
+        if FileManager.default.fileExists(atPath: url.path) {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        } else {
+            try FileManager.default.moveItem(at: tmp, to: url)
+        }
+    } catch {
+        fputs("remindkit: warning: 无法写入最近删除缓存（\(error.localizedDescription)）\n", stderr)
     }
 }
 
@@ -669,17 +697,35 @@ struct RecentlyDeleted: ParsableCommand {
         // Verify which are still marked-for-delete via the subprocess.
         let request: [String: Any] = ["op": "deleted", "ids": records.map { $0.id }, "author": "remindkit"]
         var stillDeleted: [String: Any] = [:]
-        if let rk = runReminderKitWrite(request),
-           let ok = rk["ok"] as? Bool, ok,
-           let deleted = rk["deleted"] as? [[String: Any]] {
-            for d in deleted {
-                if let id = d["id"] as? String {
-                    stillDeleted[id] = d
+        var verification = "verified"
+        switch runReminderKitWrite(request) {
+        case .success(let rk):
+            if let ok = rk["ok"] as? Bool, ok,
+               let deleted = rk["deleted"] as? [[String: Any]] {
+                for d in deleted {
+                    if let id = d["id"] as? String {
+                        stillDeleted[id] = d
+                    }
                 }
             }
+        case .unavailable:
+            verification = "unavailable"
+        case .unknownOutcome:
+            // 无法确认哪些还在「最近删除」：保留全部记录并显式标注，避免
+            // 把「结果未知」误报成「已恢复或已清除」。
+            verification = "unknown"
         }
 
         let out: [[String: Any]] = records.compactMap { record in
+            if verification == "unknown" {
+                return [
+                    "id": record.id,
+                    "title": record.title,
+                    "listName": record.listName,
+                    "deletedAt": record.deletedAt,
+                    "verification": "unknown",
+                ]
+            }
             guard stillDeleted[record.id] != nil else { return nil } // restored or purged
             return [
                 "id": record.id,
@@ -688,7 +734,9 @@ struct RecentlyDeleted: ParsableCommand {
                 "deletedAt": record.deletedAt,
             ]
         }
-        try jsonOut(["count": out.count, "items": out])
+        var payload: [String: Any] = ["count": out.count, "items": out]
+        if verification != "verified" { payload["verification"] = verification }
+        try jsonOut(payload)
     }
 }
 
@@ -697,7 +745,7 @@ struct RecentlyDeleted: ParsableCommand {
 struct Restore: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "restore",
-        abstract: "Restore a reminder from Recently Deleted to its original test list"
+        abstract: "Restore a reminder from Recently Deleted to its original list"
     )
 
     @Argument(help: "Reminder ID (from recently-deleted)")
@@ -719,16 +767,20 @@ struct Restore: ParsableCommand {
 
         var request: [String: Any] = ["op": "restore", "id": id, "listName": targetList, "author": "remindkit"]
         if let listId { request["listID"] = listId }
-        guard let rk = runReminderKitWrite(request) else {
+        switch runReminderKitWrite(request) {
+        case .unavailable:
             fail("reminderKitError", "ReminderKit 子进程不可用，无法恢复（恢复只支持 ReminderKit 路径）。")
-        }
-        if let ok = rk["ok"] as? Bool, ok {
-            removeDeletedRecord(id: id)
-            var out: [String: Any] = ["ok": true, "source": "reminderKit"]
-            for (k, v) in rk where k != "ok" { out[k] = v }
-            try jsonOut(out)
-        } else {
-            failReminderKitError(rk)
+        case .unknownOutcome(let detail):
+            fail("writeResultUnknown", "恢复结果未知：\(detail)。请用 recently-deleted 核对后重试。")
+        case .success(let rk):
+            if let ok = rk["ok"] as? Bool, ok {
+                removeDeletedRecord(id: id)
+                var out: [String: Any] = ["ok": true, "source": "reminderKit"]
+                for (k, v) in rk where k != "ok" { out[k] = v }
+                try jsonOut(out)
+            } else {
+                failReminderKitError(rk)
+            }
         }
     }
 }
@@ -738,7 +790,7 @@ struct Restore: ParsableCommand {
 struct Delete: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Permanently delete a reminder (ReminderKit write, EventKit fallback)"
+        abstract: "Delete a reminder (soft delete → Recently Deleted; ReminderKit write, no EventKit fallback)"
     )
 
     @Argument(help: "Reminder ID")
@@ -748,14 +800,13 @@ struct Delete: ParsableCommand {
         guardWriteEnabled()
         let request: [String: Any] = ["op": "delete", "id": id, "author": "remindkit"]
 
+        // EventKit fallback deliberately disabled for delete: the public-API
+        // path (`EKEventStore.remove`) is a HARD delete, while the ReminderKit
+        // path soft-deletes into Recently Deleted. Falling back could
+        // permanently destroy a reminder — fail instead.
         let (source, result) = try writeWithReminderKit(request) {
-            let store = RemindersAuth.requestAccessSync()
-            let writer = RemindersWriter(store: store)
-            let reminder = try ekResolveReminder(id, writer: writer)
-            let title = reminder.title ?? ""
-            let listName = reminder.calendar.title
-            try writer.delete(reminder)
-            return ["id": id, "deleted": true, "title": title, "listName": listName]
+            fail("reminderKitRequired",
+                 "删除提醒需要 ReminderKit 子进程（EventKit 兜底是硬删除，会绕过「最近删除」，已禁用）。请检查子进程可用性。")
         }
 
         // Record in the recently-deleted cache (both paths are soft deletes).
@@ -940,7 +991,7 @@ struct Update: ParsableCommand {
             )
             var dict = reminderJSON(reminder)
             if !tag.isEmpty || repeatRule != nil || flag || noFlag || urgent || noUrgent || section != nil
-                || parent != nil || noParent {
+                || parent != nil || noParent || url != nil || !alarmAt.isEmpty || alarmBefore != nil || location != nil {
                 dict["degraded"] = true
             }
             return dict
@@ -957,7 +1008,7 @@ struct Update: ParsableCommand {
 struct Move: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "move",
-        abstract: "Move a reminder to another test list (ReminderKit write, EventKit fallback)"
+        abstract: "Move a reminder to another list (ReminderKit write, EventKit fallback)"
     )
 
     @Argument(help: "Reminder ID")
@@ -983,15 +1034,8 @@ struct Move: ParsableCommand {
             let writer = RemindersWriter(store: store)
             let reminder = try ekResolveReminder(id, writer: writer)
             let fromTitle = reminder.calendar.title
-            let target: EKCalendar
-            if let toId {
-                guard let cal = writer.calendar(namedOrID: toId) else {
-                    fail("noSuchList", "找不到目标列表：\(toId)")
-                }
-                target = cal
-            } else {
-                target = try ekResolveList(to ?? "", writer: writer)
-            }
+            // toId 优先；都走严格解析（重名/前缀冲突报 ambiguousList）
+            let target = try ekResolveList(toId ?? to ?? "", writer: writer)
             try writer.move(reminder, to: target)
             return ["id": id, "from": fromTitle, "to": target.title]
         }
@@ -1032,16 +1076,13 @@ struct DeleteList: ParsableCommand {
         if let name { request["listName"] = name }
         if let id { request["listID"] = id }
 
+        // EventKit fallback deliberately disabled for delete-list: the
+        // public-API path removes the calendar outright (permanent, no undo),
+        // and can only resolve lists by name/ID — never smart lists or
+        // groups. Fail instead of risking a wrong/permanent deletion.
         let (source, result) = try writeWithReminderKit(request) {
-            // EventKit fallback: remove the calendar.
-            let store = RemindersAuth.requestAccessSync()
-            let writer = RemindersWriter(store: store)
-            let lookup = id ?? name ?? ""
-            guard let calendar = writer.calendar(namedOrID: lookup) else {
-                fail("noSuchList", "找不到列表：\(lookup)")
-            }
-            try store.removeCalendar(calendar, commit: true)
-            return ["listName": name ?? "", "deleted": true, "type": "list"]
+            fail("reminderKitRequired",
+                 "删除列表需要 ReminderKit 子进程（EventKit 兜底无法处理智能列表/分组且为永久删除，已禁用）。请检查子进程可用性。")
         }
 
         var out: [String: Any] = ["ok": true, "source": source]
@@ -1055,31 +1096,40 @@ struct DeleteList: ParsableCommand {
 struct UpdateList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "update-list",
-        abstract: "Rename / re-icon / re-color a list"
+        abstract: "Rename a list, group, or smart list (re-icon/re-color lists only)"
     )
 
-    @Argument(help: "List name (optional if --id is given)")
+    @Argument(help: "List / group / smart list name (optional if --id is given)")
     var name: String?
 
-    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    @Option(name: .long, help: "ID (preferred; disambiguates same-named entities)")
     var id: String?
 
-    @Option(name: .long, help: "New list name")
+    @Option(name: .long, help: "New name")
     var newName: String?
 
-    @Option(name: .long, help: "New icon (single emoji)")
+    @Option(name: .long, help: "New icon (single emoji; lists only)")
     var icon: String?
 
-    @Option(name: .long, help: "New color: #RRGGBB hex or a preset name (red/orange/yellow/green/blue/purple/gray/brown)")
+    @Option(name: .long, help: "New color: #RRGGBB hex or a preset name (red/orange/yellow/green/blue/purple/gray/brown); lists only")
     var color: String?
+
+    @Option(name: .long, help: "Entity type to narrow resolution: list | group | smartlist")
+    var type: String?
 
     func run() throws {
         guardWriteEnabled()
         guard name != nil || id != nil else {
-            throw ValidationError("需要指定列表：name 参数或 --id")
+            throw ValidationError("需要指定名称：name 参数或 --id")
         }
         if newName == nil && icon == nil && color == nil {
             throw ValidationError("至少提供一个要更新的字段：--new-name / --icon / --color")
+        }
+        if let type {
+            let allowed: Set<String> = ["list", "group", "smartlist"]
+            guard allowed.contains(type.lowercased()) else {
+                throw ValidationError("--type 只接受 list | group | smartlist（收到：\(type)）")
+            }
         }
 
         var request: [String: Any] = ["op": "updateList", "author": "remindkit"]
@@ -1095,18 +1145,25 @@ struct UpdateList: ParsableCommand {
             // system palette color).
             request["colorName"] = canonicalColorName(color)
         }
+        if let type { request["type"] = type.lowercased() }
 
         let (source, result) = try writeWithReminderKit(request) {
-            // EventKit fallback: rename via EKCalendar.
+            // EventKit fallback: rename via EKCalendar. icon/color are not
+            // writable via EventKit — surface a degraded marker instead of
+            // pretending an empty update succeeded. Groups / smart lists are
+            // not exposed to EventKit at all (noSuchList on resolution).
             let store = RemindersAuth.requestAccessSync()
             let writer = RemindersWriter(store: store)
             let lookup = id ?? name ?? ""
-            guard let calendar = writer.calendar(namedOrID: lookup) else {
-                fail("noSuchList", "找不到列表：\(lookup)")
-            }
+            let calendar = try ekResolveList(lookup, writer: writer)
             if let newName { calendar.title = newName }
             try store.saveCalendar(calendar, commit: true)
-            return ["listName": newName ?? name ?? "", "updated": true]
+            var dict: [String: Any] = ["listName": newName ?? name ?? "", "updated": true]
+            if icon != nil || color != nil {
+                dict["degraded"] = true
+                dict["degradedReason"] = "EventKit 无法写入图标/颜色（仅支持改名）；如需图标/颜色请用 ReminderKit 子进程"
+            }
+            return dict
         }
 
         var out: [String: Any] = ["ok": true, "source": source]

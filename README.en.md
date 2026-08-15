@@ -70,7 +70,7 @@ remindkit complete <id>  # complete
 ## For AI agents
 
 - Query commands return **incomplete only** by default; `--all` / `--completed` toggle
-- JSON output by default; errors to stderr as JSON `{"error":{...}}` + exit codes (1 runtime / 64 usage)
+- JSON output by default; **runtime business errors** to stderr as JSON `{"error":{...}}` + exit codes (1 runtime / 64 usage); **usage/parse errors are plain text + usage (not JSON)** — agents should distinguish by exit code, not assume every error is `jq`-parseable
 - Full write hierarchy: list folders → lists → sections → tasks → subtasks; incl. tags / flag / urgent / smart lists / batch
 - Bundled skill: register manually with `remindkit install-skill` (**brew does not auto-register**); agents scan `~/.agents/skills/` and auto-discover
 - Full options: `remindkit <command> --help`; agent details in [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)

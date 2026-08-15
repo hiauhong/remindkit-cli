@@ -66,6 +66,9 @@ struct Query: ParsableCommand {
         let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections || tree, disable: noSections, hasList: list != nil || listId != nil))
 
         var filtered = data.reminders
+        // Which calendars the --list/--list-id filter resolved to (used by
+        // --tree, which needs a single unambiguous list for its section order).
+        var resolvedLists: [CalendarEntry]? = nil
 
         if let listId {
             let matches = data.calendars.filter { $0.id == listId || $0.id.lowercased().hasPrefix(listId.lowercased()) }
@@ -76,10 +79,13 @@ struct Query: ParsableCommand {
                 let titles = matches.map(\.title).joined(separator: ", ")
                 fail("ambiguousList", "ID「\(listId)」匹配到 \(matches.count) 个列表（\(titles)），请用完整 UUID")
             }
+            resolvedLists = matches
             let calIds = Set(matches.map(\.id))
             filtered = filtered.filter { calIds.contains($0.calendarId) }
         } else if let listFilter = list {
-            let calIds = Set(resolveListsOrFail(data.calendars, listFilter).map(\.id))
+            let matches = resolveListsOrFail(data.calendars, listFilter)
+            resolvedLists = matches
+            let calIds = Set(matches.map(\.id))
             filtered = filtered.filter { calIds.contains($0.calendarId) }
         }
 
@@ -111,11 +117,16 @@ struct Query: ParsableCommand {
         }
 
         if tree {
-            guard list != nil else {
-                throw ValidationError("--tree requires --list (needs a list's section structure)")
+            // 树形视图依赖「唯一列表」的分区顺序：--list/--list-id 必须
+            // 解析到恰好一个列表，重名时明确报错而不是取第一个。
+            guard let resolved = resolvedLists else {
+                throw ValidationError("--tree requires --list or --list-id (needs a single list's section structure)")
             }
-            let listSections = data.calendars.first { $0.id == filtered.first?.calendarId }?.sections ?? []
-            try printTree(filtered, listSections: listSections)
+            guard resolved.count == 1 else {
+                let titles = resolved.map(\.title).joined(separator: ", ")
+                fail("ambiguousList", "--tree 需要唯一列表，但「\(list ?? listId ?? "")」匹配到 \(resolved.count) 个（\(titles)），请用 --list-id <完整UUID> 精确定位")
+            }
+            try printTree(filtered, listSections: resolved[0].sections ?? [])
             return
         }
 

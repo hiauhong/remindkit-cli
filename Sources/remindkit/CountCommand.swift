@@ -30,8 +30,16 @@ struct Count: ParsableCommand {
         let data = fetchEnrichedData(includeSections: false)
 
         // --by-list: one call instead of looping `count --list` per list.
+        // --tag/--flagged/--urgent 过滤同样生效（先过滤再按列表分组）。
         if byList {
-            try printByList(data, format: format)
+            var scoped = data.reminders
+            if let tagFilter = tag {
+                let t = tagFilter.lowercased()
+                scoped = scoped.filter { ($0.tags ?? []).contains { $0.lowercased() == t } }
+            }
+            if flagged { scoped = scoped.filter { $0.flagged } }
+            if urgent { scoped = scoped.filter { $0.urgent } }
+            try printByList(data, scoped: scoped, format: format)
             return
         }
 
@@ -86,12 +94,12 @@ struct Count: ParsableCommand {
         }
     }
 
-    private func printByList(_ data: EnrichedData, format: CountFormat) throws {
+    private func printByList(_ data: EnrichedData, scoped: [ReminderEntry], format: CountFormat) throws {
         let titlesById = Dictionary(uniqueKeysWithValues: data.calendars.map { ($0.id, $0.title) })
         let notes = NotesStore(fileURL: NotesStore.defaultURL()).load()
         var rows: [PerListCount] = []
         for cal in data.calendars {
-            let entries = data.reminders.filter { $0.calendarId == cal.id }
+            let entries = scoped.filter { $0.calendarId == cal.id }
             let c = countBreakdown(entries)
             rows.append(PerListCount(
                 id: cal.id,
@@ -107,8 +115,8 @@ struct Count: ParsableCommand {
         switch format {
         case .json:
             let result = ByListResult(
-                total: data.reminders.count,
-                incomplete: data.reminders.filter { !$0.completed }.count,
+                total: scoped.count,
+                incomplete: scoped.filter { !$0.completed }.count,
                 lists: rows
             )
             let encoder = JSONEncoder()
@@ -116,7 +124,7 @@ struct Count: ParsableCommand {
             let jsonData = try encoder.encode(result)
             print(String(data: jsonData, encoding: .utf8)!)
         case .plain:
-            print("total: \(data.reminders.count)  incomplete: \(data.reminders.filter { !$0.completed }.count)")
+            print("total: \(scoped.count)  incomplete: \(scoped.filter { !$0.completed }.count)")
             for row in rows {
                 let indent = row.isGroup ? "" : (row.parentTitle != nil ? "  " : "")
                 let group = row.isGroup ? " 📁" : ""

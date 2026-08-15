@@ -71,6 +71,9 @@ struct Bulk: ParsableCommand {
     @Option(name: .long, help: "Abort if more than this many reminders match (default: 50)")
     var limit: Int = 50
 
+    @Flag(name: .long, help: "Confirm destructive ops (delete/move) — required for them")
+    var yes: Bool = false
+
     func validate() throws {
         let hasSelector = list != nil || tag != nil || flagged || urgent
             || dueAfter != nil || dueBefore != nil
@@ -82,6 +85,14 @@ struct Bulk: ParsableCommand {
         }
         if op.lowercased() == "move" && to == nil {
             throw ValidationError("move 需要 --to <目标列表>")
+        }
+        // 破坏性写契约：delete / move 必须显式 --yes。
+        if ["delete", "move"].contains(op.lowercased()) && !yes {
+            throw ValidationError("bulk --op \(op.lowercased()) 是破坏性写，必须显式确认：加 --yes")
+        }
+        if op.lowercased() == "update" && !flag && !noFlag && !urgentOp && !noUrgentOp
+            && notes == nil && notesAppend == nil {
+            throw ValidationError("bulk --op update 需要至少一个更新字段：--flag/--no-flag/--urgent/--no-urgent/--notes/--notes-append")
         }
         if flag && noFlag {
             throw ValidationError("--flag and --no-flag are mutually exclusive")
@@ -130,12 +141,20 @@ struct Bulk: ParsableCommand {
         }
 
         // Execute per reminder, collecting per-item results.
+        // --notes-append needs each reminder's current notes; fetch ONCE here
+        // instead of N+1 full dumps inside the loop.
+        var appendNotesByID: [String: String] = [:]
+        if op.lowercased() == "update", let append = notesAppend {
+            let current = data.reminders
+            for r in current { appendNotesByID[r.id] = r.notes ?? "" }
+            _ = append
+        }
         var ok = 0
         var results: [[String: Any]] = []
         var failures: [[String: Any]] = []
         for r in selected {
             do {
-                var item = try executeOp(op: op, reminder: r)
+                var item = try executeOp(op: op, reminder: r, appendNotesByID: appendNotesByID)
                 item["id"] = r.id
                 item["title"] = r.title
                 results.append(item)
@@ -152,8 +171,10 @@ struct Bulk: ParsableCommand {
     }
 
     /// Run one write op on one reminder via ReminderKit (EventKit fallback
-    /// where possible). Throws on failure.
-    private func executeOp(op: String, reminder: ReminderEntry) throws -> [String: Any] {
+    /// where possible). Throws on failure. `appendNotesByID` pre-fetches the
+    /// current notes for `--notes-append` (built once, not per item).
+    private func executeOp(op: String, reminder: ReminderEntry,
+                           appendNotesByID: [String: String]) throws -> [String: Any] {
         let id = reminder.id
         switch op.lowercased() {
         case "complete":
@@ -168,12 +189,11 @@ struct Bulk: ParsableCommand {
             return ["source": source]
         case "delete":
             let request: [String: Any] = ["op": "delete", "id": id, "author": "remindkit"]
+            // EventKit fallback 禁用（同单条 delete）：公开 API 是硬删除，会
+            // 绕过「最近删除」；子进程不可用时直接失败。
             let (source, _) = try writeWithReminderKit(request) {
-                let store = RemindersAuth.requestAccessSync()
-                let writer = RemindersWriter(store: store)
-                guard let ek = writer.reminder(id: id) else { fail("noSuchReminder", "找不到提醒：\(id)") }
-                try writer.delete(ek)
-                return ["deleted": true]
+                fail("reminderKitRequired",
+                     "批量删除需要 ReminderKit 子进程（EventKit 兜底是硬删除，已禁用）。请检查子进程可用性。")
             }
             return ["source": source]
         case "move":
@@ -206,14 +226,12 @@ struct Bulk: ParsableCommand {
             if urgentOp { request["urgent"] = true }
             if noUrgentOp { request["urgent"] = false }
             if let notes { request["notes"] = notes }
-            // --notes-append: read current notes and append (per reminder, since
-            // notes differ per item — reuse the read-side fetch).
-            var effectiveNotes = notes
+            // --notes-append: reuse the once-fetched current-notes map (no
+            // per-item full dump).
             if let append = notesAppend {
-                let data = fetchEnrichedData(includeSections: false)
-                let current = data.reminders.first { $0.id == id }?.notes ?? ""
-                effectiveNotes = current.isEmpty ? append : current + "\n" + append
-                request["notes"] = effectiveNotes
+                let current = appendNotesByID[id] ?? ""
+                let effective = current.isEmpty ? append : current + "\n" + append
+                request["notes"] = effective
             }
             let (source, result) = try writeWithReminderKit(request) {
                 // EventKit supports notes but not flags/urgent.
@@ -223,7 +241,7 @@ struct Bulk: ParsableCommand {
                 let store = RemindersAuth.requestAccessSync()
                 let writer = RemindersWriter(store: store)
                 guard let ek = writer.reminder(id: id) else { fail("noSuchReminder", "找不到提醒：\(id)") }
-                try writer.update(ek, title: nil, notes: effectiveNotes, due: nil, start: nil, priority: nil)
+                try writer.update(ek, title: nil, notes: request["notes"] as? String, due: nil, start: nil, priority: nil)
                 return ["updated": true]
             }
             var dict: [String: Any] = ["source": source]

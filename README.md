@@ -71,7 +71,7 @@ remindkit complete <id>  # 完成
 ## 面向 AI agent
 
 - 查询默认只返回**未完成**;`--all` / `--completed` 切换
-- 默认 JSON 输出;错误为 stderr JSON `{"error":{...}}` + 退出码(1 运行时 / 64 用法)
+- 默认 JSON 输出;**运行时业务错误**为 stderr JSON `{"error":{...}}` + 退出码(1 运行时 / 64 用法);**usage/参数解析错误是普通文本 + usage（非 JSON）**——agent 以退出码区分错误类型，不要假设所有错误都可 `jq` 解析
 - 完整层级写:列表文件夹→列表→分区→任务→子任务;含标签/旗标/紧急/智能列表/批量
 - 内置 skill：`remindkit install-skill` 手动注册；**每次运行自动同步 `~/.agents/skills/` 副本**（缺失安装、内容不一致更新，agent 新会话生效）
 - 全部命令与参数见 `remindkit <命令> --help`;agent 细则见 [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)

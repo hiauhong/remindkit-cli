@@ -5,7 +5,7 @@
 > 评估 remindkit 对苹果「提醒事项」功能的支持程度。状态标注：
 > ✅ 完整支持 ｜ 🟡 部分/受限 ｜ ❌ 暂不支持
 >
-> 最后更新：2026-08-03（对应层级写支持落地时）
+> 最后更新：2026-08-15（列表族统一派发 #15 落地时）
 
 ## 一、列表层
 
@@ -14,8 +14,8 @@
 | 普通列表 | ✅ | 读（`list`）、建（`add-list`）、改名/图标/颜色（`update-list`）、删（`delete-list --yes`） |
 | 列表图标（emoji） | ✅ | 读取 + `update-list --icon` |
 | 列表颜色 | ✅ | 读取 + `update-list --color`（12 色板） |
-| 分组（智能文件夹） | ✅ | **读**完整（`list --groups`、parentUUID 归属）；**写**：`add-group` 建、`add-list --group` 放入、`delete-list` 删（探索确认：分组=REMAccountGroupContext，无 REMGroup 类；苹果文件夹不支持嵌套，单层） |
-| 智能列表 | ✅ | **读**（smartLists 字段）；**写**：`add-smartlist [--color]`；删除可用 `delete-list` |
+| 分组（智能文件夹） | ✅ | **读**完整（`list --groups`、parentUUID 归属）；**写**：`add-group` 建、`add-list --group` 放入、`update-list` 改名（#15 统一派发）、`delete-list` 删（探索确认：分组=REMAccountGroupContext，无 REMGroup 类；苹果文件夹不支持嵌套，单层） |
+| 智能列表 | ✅ | **读**（smartLists 字段）；**写**：`add-smartlist [--color]`、`update-list` 改名（#15）、删除可用 `delete-list` |
 | 日常采购列表（Grocery） | ❌ | 苹果 App 的「日常采购」列表（自动按类别分组商品：农产品/奶制品/烘焙等）依赖 ReminderKit 分类字段，**读不到分类分组、也建不了该类型列表**；只能当普通列表读（标题/商品仍可见，无类别分组） |
 | 列表分区（sections） | ✅ | **读**（`[N sections]`）；**写**：`add-section <list> <name>` 建分区；`add --section` / `update --section` 把提醒归入分区（REMMembership 路径） |
 | 列表排序 | 🟡 | 读取保持 display order；**写排序不支持** |
@@ -31,7 +31,7 @@
 | 时区 | 🟡 | 读完整；**写不支持**（尝试设置会触发 remindd 崩溃——私有框架坑，已探索确认） |
 | 重复规则 | ✅ | `--repeat daily/weekly/monthly/yearly` + `--every/--days/--until`；复杂规则：`--on-day`、`--last-workday`、`--months + --on-weekday`（年/月首周） |
 | 标签 | ✅ | 读写（`--tag` 可重复）；`tags` 命令统计、`search` 可搜标签 |
-| 优先级 | ✅ | `--priority high/medium/low`（映射 9/5/0） |
+| 优先级 | ✅ | `--priority high/medium/low/none`（映射 9/5/1/0：high→9 / medium→5 / low→1 / none→0） |
 | 旗标（已标记） | ✅ | 读写（`update --flag/--no-flag`）；`flagged` 命令一级入口 |
 | 紧急 | ✅ | 读写（`update --urgent/--no-urgent`）；`urgent` 命令一级入口 |
 | URL | ✅ | 读写（URL 附件形式） |

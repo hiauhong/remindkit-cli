@@ -90,7 +90,9 @@ func printReminderEntries(_ entries: [ReminderEntry], format: QueryFormat,
         for r in entries {
             let status = r.completed ? "x" : " "
             let list = listNameById[r.calendarId] ?? ""
-            let due = r.dueDate.map { dueDateFormatter.string(from: Date(timeIntervalSince1970: $0)) } ?? ""
+            // 优先用合并层算好的 dueDateText（带提醒自身时区），本地时区仅兜底。
+            let due = r.dueDateText
+                ?? (r.dueDate.map { dueDateFormatter.string(from: Date(timeIntervalSince1970: $0)) } ?? "")
             let tags = (r.tags ?? []).joined(separator: ",")
             print("[\(status)] \(r.title)\t\(list)\t\(due)\t\(tags)")
         }

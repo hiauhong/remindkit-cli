@@ -89,7 +89,7 @@ func mergedReminders(from raw: [ReminderRaw]) -> [ReminderEntry] {
             creationDate: r.creationDate,
             completionDate: r.completionDate,
             dueDate: r.dueDate,
-            dueDateText: reminderDateText(r.dueDate),
+            dueDateText: reminderDateText(r.dueDate, timeZone: r.timeZone),
             startDate: r.startDate,
             allDay: r.allDay ?? false,
             timeZone: r.timeZone,
@@ -140,11 +140,20 @@ func mergedSmartLists(_ remindKit: ReminderKitRaw?) -> [SmartListEntry] {
 
 // MARK: - EventKit fallback → unified schema
 
-/// 提醒日期 epoch → 本地时区可读文本（yyyy-MM-dd HH:mm）。
-/// agent 直接可用（epoch 需要自己转换，容易错时区）。
-func reminderDateText(_ epoch: Double?) -> String? {
+/// 提醒日期 epoch → 可读文本（yyyy-MM-dd HH:mm）。
+/// 默认用本地时区；提醒自带非本地时区（`timeZone`）时优先用它，避免
+/// dueDateText / today / overdue 展示偏差。
+func reminderDateText(_ epoch: Double?, timeZone: String? = nil) -> String? {
     guard let epoch else { return nil }
-    return reminderDateFormatter.string(from: Date(timeIntervalSince1970: epoch))
+    let date = Date(timeIntervalSince1970: epoch)
+    if let tzName = timeZone, let tz = TimeZone(identifier: tzName) {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        f.timeZone = tz
+        f.locale = Locale(identifier: "en_US_POSIX")   // 强制 24 小时制
+        return f.string(from: date)
+    }
+    return reminderDateFormatter.string(from: date)
 }
 
 /// 查询命令的 section 策略（分区字段查询较慢，逐条过 remindd）：

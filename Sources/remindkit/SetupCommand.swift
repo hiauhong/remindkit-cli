@@ -229,16 +229,17 @@ struct Setup: ParsableCommand {
             "conventionsConfigured": conv != nil,
             "conventionsFile": convStore.fileURL.path,
         ]
+        // stdout 只放 JSON（agent 直接 `remindkit setup --status | jq .`）；
+        // 人类可读提示全部走 stderr，避免污染 stdout。
         let json = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         print(String(data: json, encoding: .utf8) ?? "{}")
-        print()
         if notes.isEmpty {
-            print("remindkit: 还没有列表备注。跑 `remindkit setup`（仅结构）或 `setup --deep`（含内容）为每个列表记录用途。")
+            fputs("remindkit: 还没有列表备注。跑 `remindkit setup`（仅结构）或 `setup --deep`（含内容）为每个列表记录用途。\n", stderr)
         } else {
-            print("remindkit: 已有 \(notes.count) 条列表备注（\(notesStore.fileURL.path)）")
+            fputs("remindkit: 已有 \(notes.count) 条列表备注（\(notesStore.fileURL.path)）\n", stderr)
         }
         if conv == nil {
-            print("remindkit: 可选约定文件 conventions.md 未配置（需要跨列表方法论时手动创建）。")
+            fputs("remindkit: 可选约定文件 conventions.md 未配置（需要跨列表方法论时手动创建）。\n", stderr)
         }
     }
 

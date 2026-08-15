@@ -85,7 +85,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - 所有查询命令**默认只返回未完成**；`--completed` 只查已完成；`--all` 查全部（`--completed` 与 `--all` 互斥）。
 - **JSON 日期字段**：`dueDate` 是 epoch（Double），同时输出 `dueDateText`（本地时区 `yyyy-MM-dd HH:mm`，全天提醒为 `00:00`）——判断今天/过期/几天内直接用 `dueDateText`，勿手转 epoch。
 - **分区（section）字段**：查询命令**显式 `--list` 时自动带** `section`（列表结构查询的核心诉求，如「OKR 列表 → 健康/个人成长/财务…」）；无 `--list` 默认不带（性能，section 查询慢）。需要时 `--sections` 强制带 / `--no-sections` 强制跳过。
-- **结构视图 `--tree`**：`query --list X --tree` 直接渲染「分区 → 任务 → 子任务」层级树（含父子缩进）——查列表内部结构用它，别从平铺 JSON 自己拼。
+- **结构视图 `--tree`**：`query --list X --tree`（`--list-id` 也可）直接渲染「分区 → 任务 → 子任务」层级树（含父子缩进）——查列表内部结构用它，别从平铺 JSON 自己拼。**要求列表解析唯一**：同名/前缀命中多个会报 `ambiguousList`，用 `--list-id <完整UUID>` 精确定位。
 - **输出格式自动切换**：终端（TTY）默认 `plain`，管道/agent 调用自动 `json`——agent 无需每次带 `--format json`；也可显式 `--format json|plain|count` 覆盖。
 - `count` 无完成态开关，始终显式输出 `{total, incomplete, completed, flagged, urgent, dueToday, overdue}`（默认 json，`--format plain` 给人看）。`count --by-list` 输出 `{total, incomplete, lists:[{id,title,icon,isGroup,parentTitle,total,…}]}`。
 - `--list` 解析：**读侧**（query/search/scheduled/count/bulk/smart）完整 UUID → UUID 前缀（≥8 位）→ 精确标题（大小写不敏感）→ 子串；重名**全部匹配合并输出 + stderr 警告**（避免误当单列表）；匹配不到报 `noSuchList`。**写侧**（add/update/move 等）完整 UUID → UUID 前缀（≥8 位）→ 精确标题，**不支持子串**（防误写）；重名报错并列出候选（**带分组归属**，如 `数码（理财消费）[UUID]`），提示用 `--list-id` 精确定位。`--list-id`（写侧 add/move 等 + 读侧 query）按 ID 精确定位，同名列表场景的首选。
@@ -105,7 +105,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 
 ## 错误与权限
 
-- 运行时错误（如权限被拒、找不到列表/提醒）输出到 **stderr** 的 JSON：`{"error":{"code":"…","message":"…"}}`，退出码 1；用法错误（缺参数/互斥/格式错）退出码 64。**读侧与写侧同契约**。
+- 运行时错误（如权限被拒、找不到列表/提醒）输出到 **stderr** 的 JSON：`{"error":{"code":"…","message":"…"}}`，退出码 1；**用法错误（缺参数/互斥/格式错）是普通文本 + usage，退出码 64（非 JSON）**——agent 按退出码区分，别假设 stderr 永远可 `jq` 解析。**读侧与写侧同契约**。
 - **列表不存在**：`--list`/`--list-id`/`--to-id`/`--group-id` 匹配不到时退出码 1，stderr：`{"error":{"code":"noSuchList","message":"…"}}`（有近似候选时 message 附带 Did you mean 提示）。写侧业务码：noSuchList / noSuchReminder / noSuchGroup / noSuchAccount / noSuchDeletedRecord / noSuchSection / reminderKitError / unsupportedByEventKit / readOnly。
 - macOS 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制。
 - 权限问题先跑 `remindkit doctor --for-agent --json`，按 `fix` 提示操作（给宿主授权）。
@@ -195,12 +195,14 @@ remindkit add "买牛奶" --list 测试列表 --due "2026-08-03 09:00" --priorit
 # 批量操作（先条件选择，再统一执行）
 remindkit bulk --op complete --list 待办 --due-before 2026-08-02   # 完成待办里过期的
 remindkit bulk --op delete --list 测试列表 --all --dry-run         # 先预览再删
-remindkit bulk --op move --list 收集箱 --to 目的地                    # 收集箱的移到目的地
+remindkit bulk --op delete --list 测试列表 --all --yes             # 预览确认后批量删除（--yes 必需）
+remindkit bulk --op move --list 收集箱 --to 目的地 --yes             # 收集箱的移到目的地（--yes 必需）
 remindkit bulk --op update --list 购物 --flag                       # 批量加旗标
 remindkit bulk --op update --list 收集箱 --notes-append "统一标注"   # 批量备注追加（40+ 次循环的替代）
 remindkit bulk --op update --list 收集箱 --notes "覆盖全部备注"       # 批量覆盖备注
 # 选择器：--list/--tag/--flagged/--urgent/--due-after/--due-before（至少一个）
-# 安全：--dry-run 预览；--limit N 上限（默认 50，超出拒绝）
+# 安全：--dry-run 预览；--limit N 上限（默认 50，超出拒绝）；delete/move 是破坏性写，必须 --yes
+#       update 至少带一个更新字段（--flag/--no-flag/--urgent/--no-urgent/--notes/--notes-append）
 
 # 完成 / 重开 / 删除 / 移动 / 旗标紧急
 remindkit complete <id>          # 完成；重复提醒完成后自动滚动到下一期，响应带 nextOccurrence/nextOccurrenceText
@@ -212,10 +214,10 @@ remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --notes "备�
   --priority high --tag 购物 --url "https://…" --repeat weekly --days mon,wed --until 2026-09-01
   # 更新字段：--title/--notes/--due/--start/--priority/--tag(可重复)/--url/--repeat/--days/--until/--section(移入分区)
   # 提醒：--alarm-at "YYYY-MM-DD HH:MM"(可重复)/--alarm-before N(--due 或当前 dueDate 为基准)/--location+经纬度
-  # 至少指定一个字段或旗标；EventKit 兜底时 tags/repeat/flag/urgent/section 标记 degraded
+  # 至少指定一个字段或旗标；EventKit 兜底时 tags/repeat/flag/urgent/section/url/alarm/location 标记 degraded
 remindkit update <id> --parent <父提醒ID>   # 把普通任务挂为父任务的子任务（父须同列表、本身非子任务、无孙任务）
 remindkit update <id> --no-parent           # 解除父子关系（子任务变回普通任务，留在原列表）
-remindkit delete <id>          # 软删除 → 最近删除（30 天后系统清除）
+remindkit delete <id>          # 软删除 → 最近删除（30 天后系统清除）；无 EventKit 兜底（需 ReminderKit 子进程，避免硬删）
 remindkit move <id> --to 测试列表2   # 真移动：ID 保留、子树完整迁移（不复制不删、不进最近删除）
 remindkit reorder <id> --first          # 移到列表顶部
 remindkit reorder <id> --last           # 移到列表底部
@@ -224,10 +226,15 @@ remindkit reorder <id> --after <同级提醒ID>    # 移到某提醒后面（锚
 remindkit recently-deleted     # 查询最近删除（remindkit 删的，仍可恢复的）
 remindkit restore <id>         # 从最近删除恢复到原列表（ID 不变）
 
-# 新建 / 修改 / 删除测试列表
+# 新建 / 修改 / 删除列表族（列表 / 分组 / 智能列表）
 remindkit add-list "测试列表2"
 remindkit update-list "测试列表2" --new-name "测试列表3" --icon 🚀 --color red  # 12色板: red/orange/yellow/green/lightblue/blue/indigo/pink/purple/brown/gray/rose
-remindkit delete-list "测试列表2" --yes   # 永久删除，必须 --yes 确认（不可撤销！）
+# update-list 统一派发列表族（#15）：列表/分组/智能列表同名同名冲突时报错列候选（带 list/smartList/group 类型标注），用 --id 或 --type 精确
+remindkit update-list 理财消费 --new-name 收入支出            # 分组改名（文件夹）
+remindkit update-list "重要" --new-name "重要事项" --type smartlist  # 智能列表改名（--type 逃生门，脚本场景）
+remindkit update-list B1D35ED8 --new-name "数码购物"          # UUID 前缀定位（位置参数也按 ID 匹配）
+# 分组/智能列表仅支持 --new-name（无 icon/color，传入报错）；响应带 type 字段（list/smartList/group）
+remindkit delete-list "测试列表2" --yes   # 永久删除，必须 --yes 确认（不可撤销！）；列表/分组/智能列表通用
 
 # 层级写：分组（文件夹）→ 列表 → 分区 → 任务（苹果完整层级）
 remindkit add-group "工作"                  # 创建分组（文件夹）
@@ -242,5 +249,6 @@ remindkit move-list "项目A" --out-of-group         # 移出分组到顶层（�
 # 注意：苹果文件夹不支持嵌套（单层）；子任务只支持一层父子（苹果原生限制）
 ```
 
-> 写响应含 `source`：`reminderKit`（主）或 `eventKit`（兜底，`degraded: true` 表示标签/紧急/子任务未写）。
+> 写响应含 `source`：`reminderKit`（主）或 `eventKit`（兜底，`degraded: true` 表示标签/紧急/子任务/url/提醒/位置等字段未写）。
+> 写前子进程超时/无输出会报 `writeResultUnknown`（结果未知，不盲目走兜底，避免重复写入）。
 > 写后可用查询命令验证（读走 ReminderKit 子进程）。

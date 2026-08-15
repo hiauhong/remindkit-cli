@@ -184,14 +184,24 @@ private func waitForExit(_ process: Process, timeout: TimeInterval = 30) -> Bool
 
 // MARK: - ReminderKit Write (primary write path)
 
+/// Outcome of running a write request through the ReminderKit subprocess.
+/// The distinction matters for write safety: a timeout or missing output does
+/// NOT prove the write didn't happen — the subprocess may have committed the
+/// change and then stalled/crashed. Only `.unavailable` (never started) is
+/// safe to fall back to EventKit; `.unknownOutcome` must surface an error so
+/// the caller never blindly retries a possibly-committed write.
+enum ReminderKitWriteOutcome {
+    case success([String: Any])     // parsed result dict from the subprocess
+    case unavailable                 // binary missing / failed to start
+    case unknownOutcome(String)      // ran but result is unknown (timeout/no output/parse failure)
+}
+
 /// Run a write request through the ReminderKit subprocess (`write` mode).
-/// Returns the parsed result dict, or nil when the subprocess is unavailable
-/// (caller should fall back to EventKit). A non-nil result with
-/// `ok == false` carries an error message from the subprocess.
-func runReminderKitWrite(_ request: [String: Any]) -> [String: Any]? {
+/// See `ReminderKitWriteOutcome` for the tri-state contract.
+func runReminderKitWrite(_ request: [String: Any]) -> ReminderKitWriteOutcome {
     guard let binaryURL = findSubprocessBinary() else {
         fputs("remindkit: warning: ReminderKit subprocess not found, falling back to EventKit\n", stderr)
-        return nil
+        return .unavailable
     }
 
     let process = Process()
@@ -220,27 +230,42 @@ func runReminderKitWrite(_ request: [String: Any]) -> [String: Any]? {
 
     do {
         try process.run()
+    } catch {
+        emitSubprocessStderr(errBox.value ?? Data())
+        fputs("remindkit: warning: ReminderKit write subprocess failed to start, falling back to EventKit: \(error.localizedDescription)\n", stderr)
+        return .unavailable
+    }
+
+    do {
         let data = try JSONSerialization.data(withJSONObject: request, options: [])
         inputPipe.fileHandleForWriting.write(data)
         try inputPipe.fileHandleForWriting.close()
-        if !waitForExit(process) {
-            fputs("remindkit: warning: ReminderKit subprocess timed out, falling back to EventKit\n", stderr)
-            return nil
-        }
-        doneReading.wait()
-        doneErr.wait()
-
-        guard !(outputBox.value?.isEmpty ?? true) else {
-            emitSubprocessStderr(errBox.value ?? Data())
-            fputs("remindkit: warning: ReminderKit subprocess produced no output, falling back to EventKit\n", stderr)
-            return nil
-        }
-        return try JSONSerialization.jsonObject(with: outputBox.value!) as? [String: Any]
     } catch {
-        emitSubprocessStderr(errBox.value ?? Data())
-        fputs("remindkit: warning: ReminderKit write subprocess failed, falling back to EventKit: \(error.localizedDescription)\n", stderr)
-        return nil
+        // Process started but stdin broke — it may have consumed a partial
+        // request. Result is unknown: do not fall back blindly.
+        process.terminate()
+        process.waitUntilExit()
+        return .unknownOutcome("写入 stdin 失败：\(error.localizedDescription)")
     }
+
+    if !waitForExit(process) {
+        // Timed out: the subprocess (or remindd beneath it) stalled. It may
+        // have already committed the write — never auto-fallback.
+        return .unknownOutcome("子进程超时（可能已写入但未返回结果）")
+    }
+    doneReading.wait()
+    doneErr.wait()
+
+    guard let raw = outputBox.value, !raw.isEmpty else {
+        emitSubprocessStderr(errBox.value ?? Data())
+        return .unknownOutcome("子进程无输出（已退出，写入结果未知）")
+    }
+    guard let obj = try? JSONSerialization.jsonObject(with: raw),
+          let parsed = obj as? [String: Any] else {
+        emitSubprocessStderr(errBox.value ?? Data())
+        return .unknownOutcome("子进程输出无法解析（写入结果未知）")
+    }
+    return .success(parsed)
 }
 
 func findSubprocessBinary() -> URL? {

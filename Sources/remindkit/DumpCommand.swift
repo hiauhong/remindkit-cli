@@ -20,6 +20,14 @@ struct Dump: ParsableCommand {
     @Flag(name: .long, help: "Also include system smart lists (今天/旗标/已完成/已分配) — virtual views whose items live in regular lists; excluded by default")
     var systemSmartlists: Bool = false
 
+    func validate() throws {
+        // --fields 输出的是 JSON 投影，与 plain/count 格式互斥；
+        // 显式报错而非静默忽略 --format。
+        if fields != nil && format != .json {
+            throw ValidationError("--fields 只支持 --format json（投影输出是 JSON 结构）；要去掉 --fields 或用 --format json")
+        }
+    }
+
     func run() throws {
         let data = fetchEnrichedData()
 

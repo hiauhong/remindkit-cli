@@ -13,7 +13,7 @@ static NSArray *findListsNamed(id store, NSString *name) {
     NSMutableArray *matches = [NSMutableArray array];
     void (^lb)(id, BOOL *) = ^(id list, BOOL *sp) {
         if ([[list valueForKey:@"name"] isEqualToString:name]) {
-            [matches addObject:[list retain]];  // non-ARC: retain, caller releases
+            [matches addObject:list];  // non-ARC: array retains; no extra retain → no leak
         }
     };
     ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), lb);
@@ -27,7 +27,7 @@ static NSArray *findListsByIDOrPrefix(id store, NSString *uuidStr) {
         NSString *u = extractUUID([list valueForKey:@"objectID"]);
         if (u && ([u isEqualToString:uuidStr] ||
                   (uuidStr.length >= 8 && [u.lowercaseString hasPrefix:uuidStr.lowercaseString]))) {
-            [matches addObject:[list retain]];  // non-ARC: retain, caller releases
+            [matches addObject:list];  // non-ARC: array retains; no extra retain → no leak
         }
     };
     ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), blk);
@@ -106,7 +106,10 @@ static id findReminderByExtId(id store, NSString *extId) {
     for (id r in reminders) {
         id e = [r valueForKey:@"daCalendarItemUniqueIdentifier"];
         if ([e isKindOfClass:[NSString class]] && [e isEqualToString:extId]) {
-            found = [r retain];
+            // non-ARC: retain + autorelease so the caller (within the same
+            // autorelease pool — the whole subprocess run) owns a live ref
+            // without leaking.
+            found = [[r retain] autorelease];
             break;
         }
     }
@@ -762,7 +765,9 @@ static NSDictionary *opDeleteList(id store, NSDictionary *req) {
     }
 
     // 2) custom smart list: updateSmartList: -> removeFromParentWithAccountChangeItem:
+    //    先收集所有命中，重名时明确报错（与普通列表一致），绝不随机删第一个。
     id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
+    NSMutableArray *slMatches = [NSMutableArray array];
     for (id sl in (NSArray *)smartLists) {
         NSString *slUUID = extractUUID([sl valueForKey:@"objectID"]);
         BOOL nameMatch = ([name isKindOfClass:[NSString class]] && [[sl valueForKey:@"name"] isEqualToString:name]);
@@ -770,68 +775,244 @@ static NSDictionary *opDeleteList(id store, NSDictionary *req) {
                         ([slUUID isEqualToString:req[@"listID"]] ||
                          ([req[@"listID"] length] >= 8 && [slUUID.lowercaseString hasPrefix:[req[@"listID"] lowercaseString]])));
         if (nameMatch || idMatch) {
-            id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
-            id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
-            if (!acct) return @{@"ok": @NO, @"error": @"找不到账户"};
-            id acctCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateAccount:"), acct);
-            id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), sl);
-            ((void(*)(id, SEL, id))objc_msgSend)(slCI,
-                NSSelectorFromString(@"removeFromParentWithAccountChangeItem:"), acctCI);
-            if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-            return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"smartList", @"deleted": @YES};
+            [slMatches addObject:sl];
         }
+    }
+    if (slMatches.count > 1) {
+        NSMutableArray *titles = [NSMutableArray array];
+        for (id sl in slMatches) {
+            NSString *slName = [sl valueForKey:@"name"] ?: @"";
+            NSString *slU = extractUUID([sl valueForKey:@"objectID"]) ?: @"";
+            [titles addObject:[NSString stringWithFormat:@"%@[%@]", slName, slU]];
+        }
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+            @"智能列表名「%@」匹配到 %lu 个（名称重复），请用 --id <完整UUID> 精确定位：%@",
+            name ?: @"", (unsigned long)slMatches.count, [titles componentsJoinedByString:@", "]]};
+    }
+    if (slMatches.count == 1) {
+        id sl = slMatches[0];
+        id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
+        id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
+        if (!acct) return @{@"ok": @NO, @"error": @"找不到账户"};
+        id acctCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateAccount:"), acct);
+        id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), sl);
+        ((void(*)(id, SEL, id))objc_msgSend)(slCI,
+            NSSelectorFromString(@"removeFromParentWithAccountChangeItem:"), acctCI);
+        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+        return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"smartList", @"deleted": @YES};
     }
 
     // 3) group (folder): groups are REMLists (isGroup) not covered by
     //    enumerateAllListsWithBlock:, so resolve them via account group context.
+    //    同样先收集所有命中，重名报错。
     NSDictionary *groups = fetchAllGroups(store);
+    NSMutableArray *gMatches = [NSMutableArray array];
     for (NSString *uuid in groups) {
         id g = groups[uuid];
         BOOL nameMatch = ([name isKindOfClass:[NSString class]] && [[g valueForKey:@"name"] isEqualToString:name]);
         BOOL idMatch = (req[@"listID"] && [uuid isEqualToString:req[@"listID"]]);
         if (nameMatch || idMatch) {
-            id gci = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), g);
-            ((void(*)(id, SEL))objc_msgSend)(gci, NSSelectorFromString(@"removeFromParent"));
-            if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-            return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"group", @"deleted": @YES};
+            [gMatches addObject:g];
         }
+    }
+    if (gMatches.count > 1) {
+        NSMutableArray *titles = [NSMutableArray array];
+        for (id g in gMatches) {
+            NSString *gName = [g valueForKey:@"name"] ?: @"";
+            NSString *gU = extractUUID([g valueForKey:@"objectID"]) ?: @"";
+            [titles addObject:[NSString stringWithFormat:@"%@[%@]", gName, gU]];
+        }
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+            @"分组名「%@」匹配到 %lu 个（名称重复），请用 --id <完整UUID> 精确定位：%@",
+            name ?: @"", (unsigned long)gMatches.count, [titles componentsJoinedByString:@", "]]};
+    }
+    if (gMatches.count == 1) {
+        id g = gMatches[0];
+        id gci = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), g);
+        ((void(*)(id, SEL))objc_msgSend)(gci, NSSelectorFromString(@"removeFromParent"));
+        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+        return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"group", @"deleted": @YES};
     }
 
     return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", req[@"listID"] ?: (name ?: @"")]};
 }
 
-/// Update a regular list's name / icon / color.
+/// Update a list's name / icon / color, or a group / smart list's name.
+/// Unified resolution (feature pool #15, 2026-08-15): candidates are collected
+/// across lists, custom smart lists, and groups with one ladder
+/// (full UUID → ≥8-char prefix → case-insensitive exact title); a unique hit
+/// dispatches by type, multiple hits error with type-tagged candidates, and
+/// `--type` narrows the search for script callers. Groups/smart lists are
+/// name-only (no icon/color).
 static NSDictionary *opUpdateList(id store, NSDictionary *req) {
     NSString *name = req[@"listName"];
-    NSDictionary *listErr = nil;
-    id list = resolveList(store, req[@"listID"], name, &listErr);
-    if (!list) return listErr;
+    NSString *listID = req[@"listID"];
+    NSString *typeFilter = req[@"type"];
 
-    id saveReq = makeSaveRequest(store, req[@"author"]);
-    id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), list);
+    NSMutableArray *candidates = [NSMutableArray array];  // {obj, type}
+    // ID matching applies to the positional name too (resolveList precedent):
+    // `update-list <uuid|prefix>` works without --id. Name matching only when
+    // no explicit --id (avoid matching a name while an ID was given).
+    NSString *target = listID.length > 0 ? listID : name;
 
+    void (^collectLists)(void) = ^{
+        if (typeFilter.length > 0 && ![typeFilter.lowercaseString isEqualToString:@"list"]) return;
+        NSMutableArray *matches = [NSMutableArray array];
+        void (^lb)(id, BOOL *) = ^(id list, BOOL *sp) {
+            NSString *u = extractUUID([list valueForKey:@"objectID"]);
+            BOOL hit = NO;
+            if (listID.length > 0) {
+                hit = (u && ([u isEqualToString:listID] ||
+                             (listID.length >= 8 && [u.lowercaseString hasPrefix:listID.lowercaseString])));
+            } else {
+                NSString *n = [list valueForKey:@"name"];
+                hit = ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame);
+                if (!hit && u && target.length > 0) {
+                    hit = ([u isEqualToString:target] ||
+                           (target.length >= 8 && [u.lowercaseString hasPrefix:target.lowercaseString]));
+                }
+            }
+            if (hit) [matches addObject:list];  // non-ARC: array retains
+        };
+        ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), lb);
+        for (id l in matches) [candidates addObject:@{@"obj": l, @"type": @"list"}];
+    };
+
+    void (^collectSmartLists)(void) = ^{
+        if (typeFilter.length > 0 && ![typeFilter.lowercaseString isEqualToString:@"smartlist"]) return;
+        NSError *err = nil;
+        id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
+        if (![smartLists isKindOfClass:[NSArray class]]) return;
+        for (id sl in (NSArray *)smartLists) {
+            NSString *u = extractUUID([sl valueForKey:@"objectID"]);
+            BOOL hit = NO;
+            if (listID.length > 0) {
+                hit = (u && ([u isEqualToString:listID] ||
+                             (listID.length >= 8 && [u.lowercaseString hasPrefix:listID.lowercaseString])));
+            } else {
+                NSString *n = [sl valueForKey:@"name"];
+                hit = ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame);
+                if (!hit && u && target.length > 0) {
+                    hit = ([u isEqualToString:target] ||
+                           (target.length >= 8 && [u.lowercaseString hasPrefix:target.lowercaseString]));
+                }
+            }
+            if (hit) [candidates addObject:@{@"obj": sl, @"type": @"smartList"}];
+        }
+    };
+
+    void (^collectGroups)(void) = ^{
+        if (typeFilter.length > 0 && ![typeFilter.lowercaseString isEqualToString:@"group"]) return;
+        NSDictionary *groups = fetchAllGroups(store);
+        for (NSString *uuid in groups) {
+            id g = groups[uuid];
+            BOOL hit = NO;
+            if (listID.length > 0) {
+                hit = ([uuid isEqualToString:listID] ||
+                       (listID.length >= 8 && [uuid.lowercaseString hasPrefix:listID.lowercaseString]));
+            } else {
+                NSString *n = [g valueForKey:@"name"];
+                hit = ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame);
+                if (!hit && target.length > 0) {
+                    hit = ([uuid isEqualToString:target] ||
+                           (target.length >= 8 && [uuid.lowercaseString hasPrefix:target.lowercaseString]));
+                }
+            }
+            if (hit) [candidates addObject:@{@"obj": g, @"type": @"group"}];
+        }
+    };
+
+    collectLists();
+    collectSmartLists();
+    collectGroups();
+
+    if (candidates.count == 0) {
+        if (typeFilter.length > 0 && [typeFilter.lowercaseString isEqualToString:@"group"]) {
+            return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到分组：%@", target]};
+        }
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", target]};
+    }
+    if (candidates.count > 1) {
+        NSMutableArray *parts = [NSMutableArray array];
+        for (NSDictionary *c in candidates) {
+            id obj = c[@"obj"];
+            NSString *u = extractUUID([obj valueForKey:@"objectID"]) ?: @"";
+            NSString *n = [[obj valueForKey:@"name"] isKindOfClass:[NSString class]] ? [obj valueForKey:@"name"] : @"";
+            [parts addObject:[NSString stringWithFormat:@"%@: %@[%@]", c[@"type"], n, u]];
+        }
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+            @"名称「%@」匹配到 %lu 个（跨列表/智能列表/分组），请用 --id <完整UUID> 精确定位：%@",
+            target, (unsigned long)candidates.count, [parts componentsJoinedByString:@", "]]};
+    }
+
+    NSDictionary *candidate = candidates[0];
+    id obj = candidate[@"obj"];
+    NSString *type = candidate[@"type"];
     NSString *newName = req[@"newName"];
-    if ([newName isKindOfClass:[NSString class]] && newName.length > 0) {
-        [listCI setValue:newName forKey:@"name"];
-    }
-    NSString *icon = req[@"icon"];
-    if ([icon isKindOfClass:[NSString class]] && icon.length > 0) {
-        NSString *badge = [NSString stringWithFormat:@"{\"Emoji\":\"%@\"}", icon];
-        [listCI setValue:badge forKey:@"badgeEmblem"];
-    }
-    NSString *hex = req[@"color"];
-    if ([hex isKindOfClass:[NSString class]] && hex.length > 0) {
-        // Palette name drives the REMColor symbolic name; for preset palette
-        // colors the symbolic name wins, for custom tones the hex is honored.
-        NSString *ckName = [req[@"colorName"] isKindOfClass:[NSString class]] ? req[@"colorName"] : @"gray";
-        id color = ((id(*)(id, SEL, id, id))objc_msgSend)([NSClassFromString(@"REMColor") alloc],
-            NSSelectorFromString(@"initWithCKSymbolicColorName:hexString:"), ckName, hex);
-        [listCI setValue:color forKey:@"color"];
+    NSError *err = nil;
+    id saveReq = makeSaveRequest(store, req[@"author"]);
+
+    if ([type isEqualToString:@"list"]) {
+        id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), obj);
+        if ([newName isKindOfClass:[NSString class]] && newName.length > 0) {
+            [listCI setValue:newName forKey:@"name"];
+        }
+        NSString *icon = req[@"icon"];
+        if ([icon isKindOfClass:[NSString class]] && icon.length > 0) {
+            NSString *badge = [NSString stringWithFormat:@"{\"Emoji\":\"%@\"}", icon];
+            [listCI setValue:badge forKey:@"badgeEmblem"];
+        }
+        NSString *hex = req[@"color"];
+        if ([hex isKindOfClass:[NSString class]] && hex.length > 0) {
+            // Palette name drives the REMColor symbolic name; for preset palette
+            // colors the symbolic name wins, for custom tones the hex is honored.
+            NSString *ckName = [req[@"colorName"] isKindOfClass:[NSString class]] ? req[@"colorName"] : @"gray";
+            id color = ((id(*)(id, SEL, id, id))objc_msgSend)([NSClassFromString(@"REMColor") alloc],
+                NSSelectorFromString(@"initWithCKSymbolicColorName:hexString:"), ckName, hex);
+            [listCI setValue:color forKey:@"color"];
+        }
+        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+        return @{@"ok": @YES, @"listName": newName ?: (name ?: @""), @"type": @"list", @"updated": @YES};
     }
 
-    NSError *err = nil;
+    // Group / smart list: name-only updates.
+    NSString *icon = req[@"icon"];
+    NSString *hex = req[@"color"];
+    if (([icon isKindOfClass:[NSString class]] && icon.length > 0) ||
+        ([hex isKindOfClass:[NSString class]] && hex.length > 0)) {
+        NSString *label = [type isEqualToString:@"group"] ? @"分组" : @"智能列表";
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"%@不支持 --icon/--color，仅支持 --new-name 改名", label]};
+    }
+    if (![newName isKindOfClass:[NSString class]] || newName.length == 0) {
+        NSString *label = [type isEqualToString:@"group"] ? @"分组" : @"智能列表";
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"%@更新至少需要 --new-name", label]};
+    }
+
+    if ([type isEqualToString:@"group"]) {
+        // Group = REMList isGroup variant; same KVC `name` path as lists
+        // (verified by smoke test — assertion checks dump reflects the rename).
+        id gci = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), obj);
+        @try {
+            [gci setValue:newName forKey:@"name"];
+        } @catch (NSException *e) {
+            return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"分组改名失败（ReminderKit 不支持该 KVC）：%@", e.name]};
+        }
+        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+        return @{@"ok": @YES, @"groupName": newName, @"type": @"group", @"updated": @YES};
+    }
+
+    // Smart list: rename via the display-name path used at creation
+    // (customContext setName:) plus the change item's `name` KVC (guarded).
+    id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), obj);
+    @try {
+        [slCI setValue:newName forKey:@"name"];
+    } @catch (NSException *e) {}
+    id customCtx = [slCI valueForKey:@"customContext"];
+    if (customCtx) {
+        ((void(*)(id, SEL, id))objc_msgSend)(customCtx, NSSelectorFromString(@"setName:"), newName);
+    }
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-    return @{@"ok": @YES, @"listName": newName ?: (name ?: @""), @"updated": @YES};
+    return @{@"ok": @YES, @"name": newName, @"type": @"smartList", @"updated": @YES};
 }
 
 // MARK: - Hierarchy writes (groups, lists-in-groups, sections, smart lists)

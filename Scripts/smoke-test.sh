@@ -153,6 +153,17 @@ check "add returns id" "ok" "$(test -n "$REM_ID" && echo ok || echo no)"
 GROUP_ID=$("$BIN" add-group "测试冒烟分组$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin)['group']['id'])")
 check "add-group returns id" "ok" "$(test -n "$GROUP_ID" && echo ok || echo no)"
 
+# update-list unified dispatch (feature pool #15): group rename by name + verify
+# via list output; renamed group still matches the 测试冒烟 cleanup prefix.
+GROUP_RENAMED="测试冒烟分组改名$TAG"
+check "update-list renames group (type)" "group" "$("$BIN" update-list "测试冒烟分组$TAG" --new-name "$GROUP_RENAMED" | python3 -c "import json,sys; print(json.load(sys.stdin).get('type',''))")"
+check "update-list group rename visible" "ok" "$("$BIN" list --format json | python3 -c "
+import json,sys
+gs=[g for g in json.load(sys.stdin) if g.get('isGroup') and g['title']=='$GROUP_RENAMED']
+print('ok' if gs else 'missing')")"
+# group rename by UUID (prefix) must also work and return the same type
+check "update-list group rename by id" "group" "$("$BIN" update-list "$GROUP_ID" --new-name "测试冒烟分组$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('type',''))")"
+
 LIST_IN_GROUP_ID=$("$BIN" add-list "测试冒烟组内$TAG" --group-id "$GROUP_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
 check "add-list --group returns id" "ok" "$(test -n "$LIST_IN_GROUP_ID" && echo ok || echo no)"
 
@@ -166,6 +177,16 @@ check "update --section moves" "测试冒烟分区2$TAG" "$("$BIN" update "$REM_
 
 SL_ID=$("$BIN" add-smartlist "测试冒烟智能$TAG" --color "#FF3B30" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 check "add-smartlist returns id" "ok" "$(test -n "$SL_ID" && echo ok || echo no)"
+
+# update-list unified dispatch: smart list rename by name + verify via dump
+SL_RENAMED="测试冒烟智能改名$TAG"
+check "update-list renames smart list (type)" "smartList" "$("$BIN" update-list "测试冒烟智能$TAG" --new-name "$SL_RENAMED" | python3 -c "import json,sys; print(json.load(sys.stdin).get('type',''))")"
+check "update-list smart list rename visible" "ok" "$("$BIN" dump | python3 -c "
+import json,sys
+sls=[s for s in json.load(sys.stdin).get('smartLists',[]) if s.get('name')=='$SL_RENAMED']
+print('ok' if sls else 'missing')")"
+# icon/color must be rejected for non-list entities
+check "update-list group rejects --icon" "ok" "$(test -n "$("$BIN" update-list "测试冒烟分组$TAG" --new-name "测试冒烟分组$TAG" --icon 🚀 2>&1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('error',{}).get('code',''))")" && echo ok || echo no)"
 
 OUT=$("$BIN" dump)
 check "hierarchy: reminder filed into section" "ok" "$(echo "$OUT" | python3 -c "

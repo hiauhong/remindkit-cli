@@ -25,9 +25,9 @@ struct List: ParsableCommand {
 
         if brief {
             // agent 上下文注入用：一次拿全归属决策所需结构（分组层级 + 分区名 + 备注），
-            // 无 icon/color/UUID/数量，体积最小化（~4KB）。
+            // 无 icon/color/UUID/数量，体积最小化（~4KB）。--groups 同样生效。
             let notes = NotesStore(fileURL: NotesStore.defaultURL()).load()
-            for line in treeLines(entries, groupsOnly: false, notes: notes, showSectionNames: true) {
+            for line in treeLines(entries, groupsOnly: groups, notes: notes, showSectionNames: true) {
                 print(line)
             }
             return

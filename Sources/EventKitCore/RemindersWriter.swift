@@ -11,11 +11,51 @@ public struct RemindersWriter {
         self.store = store
     }
 
-    /// Resolve a calendar by exact ID first, then by case-insensitive name match.
-    public func calendar(namedOrID: String) -> EKCalendar? {
+    /// Resolve calendars by a name-or-ID token, strictly:
+    ///   1. full calendarIdentifier
+    ///   2. UUID prefix (≥ 8 chars — the short form when copy-pasting)
+    ///   3. case-insensitive exact title
+    /// Substring title matching is deliberately NOT performed: `工作` must never
+    /// resolve to `工作备份` / `财务` to `财务选题` on the write path.
+    /// Returns every match (duplicate titles yield multiple) so callers can
+    /// fail with `ambiguousList` instead of picking an arbitrary one.
+    public func resolveCalendars(namedOrID: String) -> [EKCalendar] {
         let calendars = store.calendars(for: .reminder)
-        return calendars.first { $0.calendarIdentifier == namedOrID }
-            ?? calendars.first { $0.title.localizedCaseInsensitiveContains(namedOrID) }
+        let indices = Self.matchCalendars(
+            identifiers: calendars.map(\.calendarIdentifier),
+            titles: calendars.map(\.title),
+            token: namedOrID
+        )
+        return indices.map { calendars[$0] }
+    }
+
+    /// Pure matching logic behind `resolveCalendars` (kept separate so the
+    /// security-relevant precedence is unit-testable without an event store):
+    /// full ID → UUID prefix (≥8) → case-insensitive exact title, never
+    /// substring. Returns matching indices into the parallel arrays.
+    public static func matchCalendars(identifiers: [String], titles: [String], token: String) -> [Int] {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let lower = trimmed.lowercased()
+
+        // 1. Full ID.
+        let exactID = identifiers.indices.filter { identifiers[$0] == trimmed }
+        if !exactID.isEmpty { return exactID }
+
+        // 2. UUID prefix (short form).
+        if lower.count >= 8 {
+            let prefix = identifiers.indices.filter { identifiers[$0].lowercased().hasPrefix(lower) }
+            if !prefix.isEmpty { return prefix }
+        }
+
+        // 3. Exact title, case-insensitive (duplicates all returned).
+        return titles.indices.filter { titles[$0].caseInsensitiveCompare(trimmed) == .orderedSame }
+    }
+
+    /// Resolve a calendar strictly (see `resolveCalendars`); returns the first
+    /// match or nil. Prefer `resolveCalendars` when ambiguity must be detected.
+    public func calendar(namedOrID: String) -> EKCalendar? {
+        resolveCalendars(namedOrID: namedOrID).first
     }
 
     public func reminder(id: String) -> EKReminder? {
