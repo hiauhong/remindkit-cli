@@ -63,6 +63,12 @@ struct Bulk: ParsableCommand {
     @Option(name: .long, help: "update: append to existing notes")
     var notesAppend: String?
 
+    @Option(name: .long, help: "update: add a tag (repeatable)")
+    var tagAdd: [String] = []
+
+    @Option(name: .long, help: "update: remove a tag (repeatable)")
+    var tagRemove: [String] = []
+
     // MARK: Safety
 
     @Flag(name: .long, help: "Preview the selection and exit without writing")
@@ -91,8 +97,8 @@ struct Bulk: ParsableCommand {
             throw ValidationError("bulk --op \(op.lowercased()) 是破坏性写，必须显式确认：加 --yes")
         }
         if op.lowercased() == "update" && !flag && !noFlag && !urgentOp && !noUrgentOp
-            && notes == nil && notesAppend == nil {
-            throw ValidationError("bulk --op update 需要至少一个更新字段：--flag/--no-flag/--urgent/--no-urgent/--notes/--notes-append")
+            && notes == nil && notesAppend == nil && tagAdd.isEmpty && tagRemove.isEmpty {
+            throw ValidationError("bulk --op update 需要至少一个更新字段：--flag/--no-flag/--urgent/--no-urgent/--notes/--notes-append/--tag-add/--tag-remove")
         }
         if flag && noFlag {
             throw ValidationError("--flag and --no-flag are mutually exclusive")
@@ -233,10 +239,21 @@ struct Bulk: ParsableCommand {
                 let effective = current.isEmpty ? append : current + "\n" + append
                 request["notes"] = effective
             }
+            // --tag-add / --tag-remove: compute the tag delta per reminder
+            // (tags on the reminder are fetched once in `selected`).
+            if !tagAdd.isEmpty || !tagRemove.isEmpty {
+                var current = reminder.tags ?? []
+                let removeSet = Set(tagRemove.map { $0.lowercased() })
+                current = current.filter { !removeSet.contains($0.lowercased()) }
+                for t in tagAdd where !current.contains(where: { $0.lowercased() == t.lowercased() }) {
+                    current.append(t)
+                }
+                request["tags"] = current
+            }
             let (source, result) = try writeWithReminderKit(request) {
                 // EventKit supports notes but not flags/urgent.
-                if flag || noFlag || urgentOp || noUrgentOp {
-                    fail("unsupportedByEventKit", "EventKit cannot write flagged/urgent; ReminderKit subprocess unavailable")
+                if flag || noFlag || urgentOp || noUrgentOp || !tagAdd.isEmpty || !tagRemove.isEmpty {
+                    fail("unsupportedByEventKit", "EventKit cannot write flagged/urgent/tags; ReminderKit subprocess unavailable")
                 }
                 let store = RemindersAuth.requestAccessSync()
                 let writer = RemindersWriter(store: store)

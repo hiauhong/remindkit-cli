@@ -426,6 +426,9 @@ struct Add: ParsableCommand {
     @Option(name: .long, help: "Section to file the reminder into (must exist in the list; use add-section first)")
     var section: String?
 
+    @Option(name: .long, help: "Smart list name or ID — file the reminder into a section OF THE SMART LIST (virtual view) instead of the physical list's section")
+    var smartList: String?
+
     @Option(name: .long, help: "URL (https://…)")
     var url: String?
 
@@ -487,6 +490,15 @@ struct Add: ParsableCommand {
         if !tag.isEmpty { request["tags"] = tag }
         if let parent, !parent.isEmpty { request["parentId"] = parent }
         if let section, !section.isEmpty { request["section"] = section }
+        if let smartList, !smartList.isEmpty {
+            // smartList 参数可能是名称或 UUID：交由 Write.m 的 resolveSmartList 判定。
+            // 简单启发：含连字符的 UUID 形状按 ID 传，否则按名称传（与 list/listId 约定一致）。
+            if smartList.contains("-") && smartList.count >= 8 {
+                request["smartListID"] = smartList
+            } else {
+                request["smartListName"] = smartList
+            }
+        }
         if let recurrence { request["recurrence"] = recurrence }
         if let url, !url.isEmpty { request["url"] = url }
 
@@ -883,6 +895,9 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "Move to a section (must exist in the list; use add-section first)")
     var section: String?
 
+    @Option(name: .long, help: "Smart list name or ID — move the reminder into a section OF THE SMART LIST (virtual view) instead of its physical list's section")
+    var smartList: String?
+
     @Option(name: .long, help: "Alarm N minutes before the due date (requires --due)")
     var alarmBefore: Int?
 
@@ -960,6 +975,13 @@ struct Update: ParsableCommand {
         if urgent { request["urgent"] = true }
         if noUrgent { request["urgent"] = false }
         if let section, !section.isEmpty { request["section"] = section }
+        if let smartList, !smartList.isEmpty {
+            if smartList.contains("-") && smartList.count >= 8 {
+                request["smartListID"] = smartList
+            } else {
+                request["smartListName"] = smartList
+            }
+        }
         if let parent, !parent.isEmpty { request["parentId"] = parent }
         if noParent { request["noParent"] = true }
 
@@ -1276,7 +1298,7 @@ struct AddGroup: ParsableCommand {
 struct AddSection: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "add-section",
-        abstract: "Add a section to a list (reminders can then be filed into it via add --section / update --section)"
+        abstract: "Add a section to a list or smart list (reminders can then be filed into it via add --section / update --section)"
     )
 
     @Argument(help: "List name or ID")
@@ -1288,9 +1310,13 @@ struct AddSection: ParsableCommand {
     @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
     var listId: String?
 
+    @Flag(name: .long, help: "Target is a smart list (virtual view) instead of a regular list")
+    var smartList: Bool = false
+
     func run() throws {
         guardWriteEnabled()
         var request: [String: Any] = ["op": "addSection", "name": name, "author": "remindkit"]
+        if smartList { request["smartList"] = true }
         if let listId { request["listID"] = listId } else { request["listName"] = list }
         let (source, result) = try writeWithReminderKit(request) {
             fail("unsupportedByEventKit", "EventKit 不支持分区（需要 ReminderKit 子进程）")
@@ -1336,7 +1362,7 @@ struct DeleteSection: ParsableCommand {
 struct AddSmartList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "add-smartlist",
-        abstract: "Create a custom smart list (optionally with a color)"
+        abstract: "Create a custom smart list (optionally with a color and/or hashtag filter)"
     )
 
     @Argument(help: "New smart list name")
@@ -1348,11 +1374,36 @@ struct AddSmartList: ParsableCommand {
     @Option(name: .long, help: "Color hex, e.g. #FF3B30")
     var color: String?
 
+    @Option(name: .long, help: "Match reminders tagged with this tag (hashtag filter; repeatable)")
+    var tag: [String] = []
+
+    @Option(name: .long, help: "Create inside this group (folder) — name or UUID")
+    var group: String?
+
     func run() throws {
         guardWriteEnabled()
         var request: [String: Any] = ["op": "createSmartList", "name": name, "author": "remindkit"]
         if let displayName { request["displayName"] = displayName }
         if let color { request["color"] = color }
+        if let group, !group.isEmpty {
+            // 同 list/listId 约定：含连字符的 UUID 形状按 ID 传，否则按名称传。
+            if group.contains("-") && group.count >= 8 {
+                request["groupID"] = group
+            } else {
+                request["groupName"] = group
+            }
+        }
+        if !tag.isEmpty {
+            // filterData JSON shape matches what Reminders.app writes for a
+            // hashtag filter: {"hashtags":{"hashtags":["标签"]}}. Sent as a
+            // string — the subprocess converts it to NSData (a raw Data value
+            // cannot cross the JSON request boundary).
+            let filter: [String: Any] = ["hashtags": ["hashtags": tag]]
+            if let data = try? JSONSerialization.data(withJSONObject: filter),
+               let jsonString = String(data: data, encoding: .utf8) {
+                request["filterData"] = jsonString
+            }
+        }
         let (source, result) = try writeWithReminderKit(request) {
             fail("unsupportedByEventKit", "EventKit 不支持智能列表（需要 ReminderKit 子进程）")
         }
@@ -1385,8 +1436,11 @@ struct MoveList: ParsableCommand {
     @Flag(name: .long, help: "Move the list out of its group to the top level")
     var outOfGroup: Bool = false
 
-    @Option(name: .long, help: "Display order (integer)")
+    @Option(name: .long, help: "Display order (index into the sidebar list ordering; get the length from dump listIDsOrdering)")
     var order: Int?
+
+    @Option(name: .long, help: "Entity type to narrow resolution: list | smartlist (--type smartlist disambiguates same-named smart lists)")
+    var type: String?
 
     func validate() throws {
         if toGroup != nil && toGroupId != nil {
@@ -1398,6 +1452,12 @@ struct MoveList: ParsableCommand {
         if toGroup == nil && toGroupId == nil && !outOfGroup && order == nil {
             throw ValidationError("specify --to-group/--to-group-id, --out-of-group, or --order")
         }
+        if let type {
+            let allowed = ["list", "smartlist"]
+            guard allowed.contains(type.lowercased()) else {
+                throw ValidationError("--type 只接受 list | smartlist（收到：\(type)）")
+            }
+        }
     }
 
     func run() throws {
@@ -1408,6 +1468,7 @@ struct MoveList: ParsableCommand {
         if let toGroupId { request["groupID"] = toGroupId }
         if outOfGroup { request["outOfGroup"] = true }
         if let order { request["order"] = order }
+        if let type { request["type"] = type.lowercased() }
 
         let (source, result) = try writeWithReminderKit(request) {
             fail("unsupportedByEventKit", "EventKit 不支持分组（需要 ReminderKit 子进程）")

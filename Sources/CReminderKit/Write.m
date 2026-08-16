@@ -86,6 +86,114 @@ static id resolveList(id store, NSString *listID, NSString *name, NSDictionary *
     return nil;
 }
 
+/// Resolve a custom smart list by full UUID / ≥8-char prefix / exact name
+/// (case-insensitive), same precedence as resolveList. Returns the REMSmartList
+/// object or nil with an error dict. Does NOT match regular lists — callers
+/// pick the target family explicitly (list vs smartList).
+static id resolveSmartList(id store, NSString *listID, NSString *name, NSDictionary **error) {
+    NSError *err = nil;
+    id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
+    if (![smartLists isKindOfClass:[NSArray class]]) {
+        *error = @{@"ok": @NO, @"error": @"获取智能列表失败"};
+        return nil;
+    }
+    NSString *target = listID.length > 0 ? listID : name;
+    NSMutableArray *matches = [NSMutableArray array];
+    for (id sl in (NSArray *)smartLists) {
+        NSString *u = extractUUID([sl valueForKey:@"objectID"]);
+        BOOL hit = NO;
+        if (listID.length > 0) {
+            hit = (u && ([u isEqualToString:listID] ||
+                         (listID.length >= 8 && [u.lowercaseString hasPrefix:listID.lowercaseString])));
+        } else {
+            NSString *n = [sl valueForKey:@"name"];
+            hit = ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame);
+            if (!hit && u && target.length > 0) {
+                hit = ([u isEqualToString:target] ||
+                       (target.length >= 8 && [u.lowercaseString hasPrefix:target.lowercaseString]));
+            }
+        }
+        if (hit) [matches addObject:sl];
+    }
+    if (matches.count == 0) {
+        *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到智能列表：%@", target]};
+        return nil;
+    }
+    if (matches.count > 1) {
+        NSMutableArray *parts = [NSMutableArray array];
+        for (id sl in matches) {
+            NSString *u = extractUUID([sl valueForKey:@"objectID"]) ?: @"";
+            NSString *n = [[sl valueForKey:@"name"] isKindOfClass:[NSString class]] ? [sl valueForKey:@"name"] : @"";
+            [parts addObject:[NSString stringWithFormat:@"%@[%@]", n, u]];
+        }
+        *error = @{@"ok": @NO, @"error": [NSString stringWithFormat:
+            @"智能列表名「%@」匹配到 %lu 个（名称重复），请用 --id <完整UUID> 精确定位：%@",
+            target, (unsigned long)matches.count, [parts componentsJoinedByString:@", "]]};
+        return nil;
+    }
+    return matches[0];
+}
+
+/// Smart-list analogue of findSectionInList: resolve a smart list's section by
+/// display name via REMStore fetchSmartListSectionsForSmartListSectionContext:.
+/// Returns the REMSmartListSection object or nil.
+static id findSectionInSmartList(id store, id smartList, NSString *sectionName) {
+    NSError *err = nil;
+    id secCtx = [smartList valueForKey:@"sectionContext"];
+    if (!secCtx) return nil;
+    id secs = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
+        NSSelectorFromString(@"fetchSmartListSectionsForSmartListSectionContext:error:"), secCtx, &err);
+    if (![secs respondsToSelector:@selector(count)]) return nil;
+    NSInteger count = ((NSInteger(*)(id, SEL))objc_msgSend)(secs, @selector(count));
+    for (NSInteger i = 0; i < count; i++) {
+        id secObj = ((id(*)(id, SEL, NSInteger))objc_msgSend)(secs, @selector(objectAtIndex:), i);
+        // Smart-list sections expose displayName via KVC directly (verified on
+        // macOS 26 ReminderKit); fall back to the parseSectionNames hack.
+        NSString *dn = nil;
+        @try { dn = [secObj valueForKey:@"displayName"]; } @catch (NSException *e) {}
+        BOOL nameHit = ([dn isKindOfClass:[NSString class]] && [dn isEqualToString:sectionName]);
+        if (!nameHit) {
+            NSArray *names = parseSectionNames(secObj);
+            nameHit = (names.count > 0 && [names[0] isEqualToString:sectionName]);
+        }
+        if (nameHit) return secObj;
+    }
+    return nil;
+}
+
+/// Attach a reminder change item to an existing section of a smart list via a
+/// REMMembership(member=reminder, group=smartListSection) on the smart list's
+/// section context change item. Returns nil on success or an error dict.
+static NSDictionary *setReminderSmartListSection(id store, id saveReq, id smartList,
+                                                  id remCI, NSString *sectionName) {
+    if (!smartList) return @{@"ok": @NO, @"error": @"无法确定智能列表"};
+    id section = findSectionInSmartList(store, smartList, sectionName);
+    if (!section) {
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+            @"智能列表「%@」中没有分区「%@」（先用 add-section 创建）",
+            [smartList valueForKey:@"name"] ?: @"", sectionName]};
+    }
+    NSString *remUUID = extractUUID([remCI valueForKey:@"objectID"]);
+    NSString *secUUID = extractUUID([section valueForKey:@"objectID"]);
+    if (!remUUID || !secUUID) return @{@"ok": @NO, @"error": @"无法获取提醒/分区 ID"};
+
+    id remNSUUID = [[NSUUID alloc] initWithUUIDString:remUUID];
+    id secNSUUID = [[NSUUID alloc] initWithUUIDString:secUUID];
+    id membership = ((id(*)(id, SEL, id, id, BOOL, id))objc_msgSend)(
+        [NSClassFromString(@"REMMembership") alloc],
+        NSSelectorFromString(@"initWithMemberIdentifier:groupIdentifier:isObsolete:modifiedOn:"),
+        remNSUUID, secNSUUID, NO, [NSDate date]);
+    id memberships = ((id(*)(id, SEL, id))objc_msgSend)(
+        [NSClassFromString(@"REMMemberships") alloc],
+        NSSelectorFromString(@"initWithMemberships:"), @[membership]);
+    id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), smartList);
+    id sectionCtx = [slCI valueForKey:@"sectionsContextChangeItem"];
+    if (!sectionCtx) return @{@"ok": @NO, @"error": @"智能列表不支持分区"};
+    ((void(*)(id, SEL, id))objc_msgSend)(sectionCtx,
+        NSSelectorFromString(@"setUnsavedMembershipsOfRemindersInSections:"), memberships);
+    return nil;
+}
+
 static id findReminderByExtId(id store, NSString *extId) {
     __block id found = nil;
     // enumerateAllRemindersWithBlock: only yields top-level reminders and
@@ -336,7 +444,19 @@ static NSDictionary *opAdd(id store, NSDictionary *req) {
     NSString *sectionName = req[@"section"];
     NSDictionary *secErr = nil;
     if ([sectionName isKindOfClass:[NSString class]] && sectionName.length > 0) {
-        secErr = setReminderSection(store, saveReq, list, remCI, sectionName);
+        // --smart-list <名称/UUID>: file the reminder into a section OF THE
+        // SMART LIST (virtual view) instead of the physical list's section.
+        // The reminder still lives in the physical list (list above).
+        NSString *slName = req[@"smartListName"];
+        NSString *slID = req[@"smartListID"];
+        if (slName.length > 0 || slID.length > 0) {
+            NSDictionary *slErr = nil;
+            id smartList = resolveSmartList(store, slID, slName, &slErr);
+            if (!smartList) return slErr;
+            secErr = setReminderSmartListSection(store, saveReq, smartList, remCI, sectionName);
+        } else {
+            secErr = setReminderSection(store, saveReq, list, remCI, sectionName);
+        }
         if (secErr) return secErr;
     }
 
@@ -382,8 +502,17 @@ static NSDictionary *opUpdate(id store, NSDictionary *req) {
     NSString *sectionName = req[@"section"];
     NSDictionary *secErr = nil;
     if ([sectionName isKindOfClass:[NSString class]] && sectionName.length > 0) {
-        id list = [reminder valueForKey:@"list"];
-        secErr = setReminderSection(store, saveReq, list, remCI, sectionName);
+        NSString *slName = req[@"smartListName"];
+        NSString *slID = req[@"smartListID"];
+        if (slName.length > 0 || slID.length > 0) {
+            NSDictionary *slErr = nil;
+            id smartList = resolveSmartList(store, slID, slName, &slErr);
+            if (!smartList) return slErr;
+            secErr = setReminderSmartListSection(store, saveReq, smartList, remCI, sectionName);
+        } else {
+            id list = [reminder valueForKey:@"list"];
+            secErr = setReminderSection(store, saveReq, list, remCI, sectionName);
+        }
         if (secErr) return secErr;
         changes[@"section"] = sectionName;
     }
@@ -448,7 +577,7 @@ static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDict
         changes[@"completed"] = @(completed);
     }
     NSArray *tags = req[@"tags"];
-    if ([tags isKindOfClass:[NSArray class]] && tags.count > 0) {
+    if ([tags isKindOfClass:[NSArray class]]) {
         id list = [reminder valueForKey:@"list"];
         id acctObjID = ((id(*)(id, SEL))objc_msgSend)(list, NSSelectorFromString(@"accountID"));
         id remObjID = ((id(*)(id, SEL))objc_msgSend)(remCI, NSSelectorFromString(@"objectID"));
@@ -458,7 +587,9 @@ static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDict
                 [hts addObject:makeHashtag(acctObjID, remObjID, t)];
             }
         }
-        if (hts.count > 0) { [remCI setValue:hts forKey:@"hashtags"]; changes[@"tags"] = tags; }
+        // 替换语义：空数组 = 清空全部标签（bulk --tag-remove 移除最后一个标签时）
+        [remCI setValue:hts forKey:@"hashtags"];
+        changes[@"tags"] = tags;
     }
     NSDictionary *recur = req[@"recurrence"];
     if ([recur isKindOfClass:[NSDictionary class]]) {
@@ -975,17 +1106,20 @@ static NSDictionary *opUpdateList(id store, NSDictionary *req) {
         return @{@"ok": @YES, @"listName": newName ?: (name ?: @""), @"type": @"list", @"updated": @YES};
     }
 
-    // Group / smart list: name-only updates.
+    // Group / smart list: name-only updates (groups) / name+icon+color (smart lists).
     NSString *icon = req[@"icon"];
     NSString *hex = req[@"color"];
-    if (([icon isKindOfClass:[NSString class]] && icon.length > 0) ||
-        ([hex isKindOfClass:[NSString class]] && hex.length > 0)) {
-        NSString *label = [type isEqualToString:@"group"] ? @"分组" : @"智能列表";
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"%@不支持 --icon/--color，仅支持 --new-name 改名", label]};
+    if ([type isEqualToString:@"group"] &&
+        (([icon isKindOfClass:[NSString class]] && icon.length > 0) ||
+         ([hex isKindOfClass:[NSString class]] && hex.length > 0))) {
+        return @{@"ok": @NO, @"error": @"分组不支持 --icon/--color，仅支持 --new-name 改名"};
     }
     if (![newName isKindOfClass:[NSString class]] || newName.length == 0) {
-        NSString *label = [type isEqualToString:@"group"] ? @"分组" : @"智能列表";
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"%@更新至少需要 --new-name", label]};
+        if (!([icon isKindOfClass:[NSString class]] && icon.length > 0) &&
+            !([hex isKindOfClass:[NSString class]] && hex.length > 0)) {
+            NSString *label = [type isEqualToString:@"group"] ? @"分组" : @"智能列表";
+            return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"%@更新需要至少一个字段：--new-name / --icon / --color", label]};
+        }
     }
 
     if ([type isEqualToString:@"group"]) {
@@ -1003,16 +1137,34 @@ static NSDictionary *opUpdateList(id store, NSDictionary *req) {
 
     // Smart list: rename via the display-name path used at creation
     // (customContext setName:) plus the change item's `name` KVC (guarded).
+    // icon/color: badgeEmblem JSON string + customContext setColor: (same
+    // shapes as creation; verified 2026-08-16 save OK + readback).
     id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), obj);
-    @try {
-        [slCI setValue:newName forKey:@"name"];
-    } @catch (NSException *e) {}
+    if ([newName isKindOfClass:[NSString class]] && newName.length > 0) {
+        @try {
+            [slCI setValue:newName forKey:@"name"];
+        } @catch (NSException *e) {}
+    }
     id customCtx = [slCI valueForKey:@"customContext"];
     if (customCtx) {
-        ((void(*)(id, SEL, id))objc_msgSend)(customCtx, NSSelectorFromString(@"setName:"), newName);
+        if ([newName isKindOfClass:[NSString class]] && newName.length > 0) {
+            ((void(*)(id, SEL, id))objc_msgSend)(customCtx, NSSelectorFromString(@"setName:"), newName);
+        }
+        if ([icon isKindOfClass:[NSString class]] && icon.length > 0) {
+            NSString *badge = [NSString stringWithFormat:@"{\"Emoji\":\"%@\"}", icon];
+            @try {
+                [slCI setValue:badge forKey:@"badgeEmblem"];
+            } @catch (NSException *e) {}
+        }
+        if ([hex isKindOfClass:[NSString class]] && hex.length > 0) {
+            NSString *ckName = [req[@"colorName"] isKindOfClass:[NSString class]] ? req[@"colorName"] : @"gray";
+            id color = ((id(*)(id, SEL, id, id))objc_msgSend)([NSClassFromString(@"REMColor") alloc],
+                NSSelectorFromString(@"initWithCKSymbolicColorName:hexString:"), ckName, hex);
+            ((void(*)(id, SEL, id))objc_msgSend)(customCtx, NSSelectorFromString(@"setColor:"), color);
+        }
     }
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-    return @{@"ok": @YES, @"name": newName, @"type": @"smartList", @"updated": @YES};
+    return @{@"ok": @YES, @"name": newName ?: @"", @"type": @"smartList", @"updated": @YES};
 }
 
 // MARK: - Hierarchy writes (groups, lists-in-groups, sections, smart lists)
@@ -1183,16 +1335,37 @@ static NSDictionary *opCreateList(id store, NSDictionary *req) {
 }
 
 /// Add a section to a list. req: {op:addSection, listID?/listName, name, author}.
+/// Set smartList=true to target a custom smart list (uses the smart-list
+/// section path: updateSmartList: → sectionsContextChangeItem →
+/// addSmartListSectionWithDisplayName:).
 static NSDictionary *opAddSection(id store, NSDictionary *req) {
     NSString *name = req[@"name"];
     if (![name isKindOfClass:[NSString class]] || name.length == 0) {
         return @{@"ok": @NO, @"error": @"分区名不能为空"};
     }
+    BOOL smart = [req[@"smartList"] boolValue];
+    NSError *err = nil;
+    id saveReq = makeSaveRequest(store, req[@"author"]);
+
+    if (smart) {
+        NSDictionary *slErr = nil;
+        id smartList = resolveSmartList(store, req[@"listID"], req[@"listName"], &slErr);
+        if (!smartList) return slErr;
+        id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), smartList);
+        id sectionCtx = [slCI valueForKey:@"sectionsContextChangeItem"];
+        if (!sectionCtx) return @{@"ok": @NO, @"error": @"智能列表不支持分区"};
+        id sectionCI = ((id(*)(id, SEL, id, id))objc_msgSend)(saveReq,
+            NSSelectorFromString(@"addSmartListSectionWithDisplayName:toSmartListSectionContextChangeItem:"),
+            name, sectionCtx);
+        if (!sectionCI) return @{@"ok": @NO, @"error": @"创建分区失败"};
+        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+        return @{@"ok": @YES, @"id": extractUUID([sectionCI valueForKey:@"objectID"]) ?: @"",
+                 @"name": name, @"smartListID": extractUUID([smartList valueForKey:@"objectID"]) ?: @""};
+    }
+
     NSDictionary *listErr = nil;
     id list = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
     if (!list) return listErr;
-    NSError *err = nil;
-    id saveReq = makeSaveRequest(store, req[@"author"]);
     id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), list);
     id sectionCtx = [listCI valueForKey:@"sectionsContextChangeItem"];
     if (!sectionCtx) return @{@"ok": @NO, @"error": @"列表不支持分区"};
@@ -1249,7 +1422,10 @@ static NSDictionary *opDeleteSection(id store, NSDictionary *req) {
 }
 
 /// Create a custom smart list. req: {op:createSmartList, name, color?,
-/// displayName?, author}.
+/// displayName?, filterData?, groupID?/groupName?, author}. When a group is
+/// given, the smart list is created inside that group (folder) via
+/// addCustomSmartListWithName:toListSublistContextChangeItem:smartListObjectID:
+/// (verified 2026-08-16: readback parentList == group); otherwise top-level.
 static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
     NSString *name = req[@"name"];
     if (![name isKindOfClass:[NSString class]] || name.length == 0) {
@@ -1266,9 +1442,24 @@ static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
     NSUUID *slUUID = [NSUUID UUID];
     id slOID = ((id(*)(id, SEL, id, id))objc_msgSend)([NSClassFromString(@"REMObjectID") alloc],
         NSSelectorFromString(@"initWithUUID:entityName:"), slUUID, @"REMCDSmartList");
-    id slCI = ((id(*)(id, SEL, id, id, id))objc_msgSend)(saveReq,
-        NSSelectorFromString(@"addCustomSmartListWithName:toAccountChangeItem:smartListObjectID:"),
-        name, acctCI, slOID);
+    id slCI = nil;
+    NSString *groupID = req[@"groupID"];
+    NSString *groupName = req[@"groupName"];
+    if (groupID.length > 0 || groupName.length > 0) {
+        NSDictionary *gerr = nil;
+        id group = resolveGroup(store, groupID, groupName, &gerr);
+        if (!group) return gerr;
+        id groupCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), group);
+        id subCtx = [groupCI valueForKey:@"sublistContext"];
+        if (!subCtx) return @{@"ok": @NO, @"error": @"分组不支持子列表"};
+        slCI = ((id(*)(id, SEL, id, id, id))objc_msgSend)(saveReq,
+            NSSelectorFromString(@"addCustomSmartListWithName:toListSublistContextChangeItem:smartListObjectID:"),
+            name, subCtx, slOID);
+    } else {
+        slCI = ((id(*)(id, SEL, id, id, id))objc_msgSend)(saveReq,
+            NSSelectorFromString(@"addCustomSmartListWithName:toAccountChangeItem:smartListObjectID:"),
+            name, acctCI, slOID);
+    }
     if (!slCI) return @{@"ok": @NO, @"error": @"创建智能列表失败"};
     id customCtx = [slCI valueForKey:@"customContext"];
     if (customCtx) {
@@ -1282,6 +1473,19 @@ static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
             id color = ((id(*)(id, SEL, id, id))objc_msgSend)([NSClassFromString(@"REMColor") alloc],
                 NSSelectorFromString(@"initWithCKSymbolicColorName:hexString:"), ckName, hex);
             ((void(*)(id, SEL, id))objc_msgSend)(customCtx, NSSelectorFromString(@"setColor:"), color);
+        }
+    }
+    // #19: optional filter at creation — write filterData (NSData of the JSON
+    // filter) on the change item's storage. Hashtag filters come as
+    // {"hashtags":{"hashtags":["标签"]}}; the App accepts the same shape.
+    // Received as a JSON string (raw Data cannot cross the request boundary).
+    id filterDataStr = req[@"filterData"];
+    if ([filterDataStr isKindOfClass:[NSString class]] && [filterDataStr length] > 0) {
+        NSData *filterData = [filterDataStr dataUsingEncoding:NSUTF8StringEncoding];
+        @try {
+            [slCI setValue:filterData forKey:@"filterData"];
+        } @catch (NSException *e) {
+            return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"设置智能列表过滤条件失败：%@", e.name]};
         }
     }
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
@@ -1308,9 +1512,90 @@ static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
 /// order. req: {op:moveList, listID?/listName, groupID?/groupName?,
 /// outOfGroup?, order?, author}. Omit group without outOfGroup = keep current
 /// parent, just update order.
+/// Move a list into/out of a group (regular lists only), and/or set its
+/// position in the sidebar ordering. req: {op:moveList, listID?/listName,
+/// groupID?/groupName?, outOfGroup?, order?, last?, type?, author}.
+///
+/// Sorting (--last / --order N) is UNIFIED across list types: both regular
+/// lists and smart lists go through the account's listIDsOrdering
+/// (updateAccount: → _editListIDsOrderingUsingBlock: → moveObjectFromIndex:
+/// toIndex:). Regular lists previously used daDisplayOrder, but the account
+/// ordering is the single source of truth for sidebar position (2026-08-16
+/// decision: unify; --order N is the ordering index, --last moves to the end).
+/// Group move (--to-group / --out-of-group) remains regular-lists-only —
+/// smart lists get their parent from the group's sublistContext at creation.
 static NSDictionary *opMoveList(id store, NSDictionary *req) {
+    NSString *typeFilter = req[@"type"];
+    BOOL wantSmart = (typeFilter.length > 0 &&
+                      [typeFilter.lowercaseString isEqualToString:@"smartlist"]);
+
+    // Resolve the target: --type smartlist pins the smart-list family;
+    // otherwise regular list first, then smart list as fallback.
+    id list = nil;
+    id smartList = nil;
     NSDictionary *listErr = nil;
-    id list = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
+    NSDictionary *slErr = nil;
+    if (!wantSmart) {
+        list = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
+    }
+    if (!list) {
+        smartList = resolveSmartList(store, req[@"listID"], req[@"listName"], &slErr);
+        if (!smartList && wantSmart) return slErr;
+        if (!smartList && !list) return listErr;
+    }
+
+    NSNumber *order = req[@"order"];
+    if (order == nil) {
+        // No sorting requested → must be a group move, which needs a regular list.
+        if (!list) {
+            return @{@"ok": @NO, @"error": @"智能列表不支持进出分组（父分组由创建时指定）；排序请用 --order N"};
+        }
+    }
+
+    // Unified ordering path (regular + smart lists): reorder within the
+    // account's listIDsOrdering. The target position is an index into that
+    // global ordering (0-based). 末尾 = dump 的 listIDsOrdering 长度 - 1。
+    if (order != nil) {
+        NSString *targetUUID = extractUUID(
+            list ? [list valueForKey:@"objectID"] : [smartList valueForKey:@"objectID"]);
+        NSError *err = nil;
+        id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
+        id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
+        if (!acct) return @{@"ok": @NO, @"error": @"找不到账户"};
+        id saveReq = makeSaveRequest(store, req[@"author"]);
+        id acctCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateAccount:"), acct);
+        __block BOOL moved = NO;
+        @try {
+            ((void(*)(id, SEL, id))objc_msgSend)(acctCI, NSSelectorFromString(@"_editListIDsOrderingUsingBlock:"), ^(id ordering) {
+                id imm = [ordering performSelector:NSSelectorFromString(@"immutableOrderedSet")];
+                id oset = [imm performSelector:NSSelectorFromString(@"orderedSet")];
+                NSInteger cnt = [oset count];
+                NSInteger idx = NSNotFound;
+                for (NSInteger i = 0; i < cnt; i++) {
+                    if ([[[oset objectAtIndex:i] description] isEqualToString:targetUUID]) { idx = i; break; }
+                }
+                NSInteger target = order.integerValue;
+                if (target < 0) target = 0;
+                if (target >= cnt) target = cnt - 1;
+                if (idx != NSNotFound && idx != target) {
+                    ((void(*)(id, SEL, NSInteger, NSInteger))objc_msgSend)(ordering,
+                        NSSelectorFromString(@"moveObjectFromIndex:toIndex:"), idx, target);
+                    moved = YES;
+                }
+            });
+        } @catch (NSException *e) {}
+        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+        NSMutableDictionary *out = [NSMutableDictionary dictionaryWithDictionary:@{
+            @"ok": @YES, @"id": targetUUID,
+            @"name": (list ? [list valueForKey:@"name"] : [smartList valueForKey:@"name"]) ?: @"",
+            @"type": list ? @"list" : @"smartList"
+        }];
+        if (order) out[@"order"] = order;
+        if (moved) out[@"moved"] = @YES;
+        return out;
+    }
+
+    // Group move (regular lists only).
     if (!list) return listErr;
     NSError *err = nil;
     id saveReq = makeSaveRequest(store, req[@"author"]);
@@ -1318,7 +1603,6 @@ static NSDictionary *opMoveList(id store, NSDictionary *req) {
 
     NSString *groupID = req[@"groupID"];
     NSString *groupName = req[@"groupName"];
-    NSNumber *order = req[@"order"];
     NSString *targetGroupID = nil;
     if (groupID.length > 0 || groupName.length > 0) {
         NSDictionary *gerr = nil;
@@ -1330,16 +1614,12 @@ static NSDictionary *opMoveList(id store, NSDictionary *req) {
     } else if ([req[@"outOfGroup"] boolValue]) {
         ((void(*)(id, SEL, id))objc_msgSend)(listCI, NSSelectorFromString(@"setParentSubContainerID:"), nil);
     }
-    if (order) {
-        ((void(*)(id, SEL, NSInteger))objc_msgSend)(listCI, NSSelectorFromString(@"setDaDisplayOrder:"), order.integerValue);
-    }
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
     NSMutableDictionary *out = [NSMutableDictionary dictionaryWithDictionary:@{
         @"ok": @YES, @"id": extractUUID([list valueForKey:@"objectID"]) ?: @"",
         @"name": [list valueForKey:@"name"] ?: @""
     }];
     out[@"groupID"] = targetGroupID ?: [NSNull null];
-    if (order) out[@"order"] = order;
     return out;
 }
 

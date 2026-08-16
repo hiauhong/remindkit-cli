@@ -14,6 +14,9 @@ struct Query: ParsableCommand {
     @Option(name: .long, help: "Filter by list ID (preferred; disambiguates same-named lists)")
     var listId: String?
 
+    @Option(name: .long, help: "Evaluate a smart list by name or UUID (returns reminders matching its filter; works with --tree)")
+    var smartList: String?
+
     @Option(name: .long, help: "Filter by tag name")
     var tag: String?
 
@@ -63,14 +66,35 @@ struct Query: ParsableCommand {
     }
 
     func run() throws {
-        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections || tree, disable: noSections, hasList: list != nil || listId != nil))
+        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections || tree, disable: noSections, hasList: list != nil || listId != nil || smartList != nil))
 
         var filtered = data.reminders
         // Which calendars the --list/--list-id filter resolved to (used by
         // --tree, which needs a single unambiguous list for its section order).
         var resolvedLists: [CalendarEntry]? = nil
 
-        if let listId {
+        // #17: smart-list evaluation — resolve the smart list, parse its
+        // filterData (hashtags for now), and keep reminders matching the tag.
+        // Takes precedence over --list/--list-id when given.
+        if let smartListFilter = smartList {
+            let matches = resolveSmartListFilter(data.smartLists, smartListFilter)
+            if matches.isEmpty {
+                fail("noSuchSmartList", "找不到智能列表：\(smartListFilter)")
+            }
+            if matches.count > 1 {
+                let names = matches.compactMap(\.name).joined(separator: ", ")
+                fail("ambiguousSmartList", "智能列表「\(smartListFilter)」匹配到 \(matches.count) 个（\(names)），请用完整 UUID")
+            }
+            let sl = matches[0]
+            let tagNames = smartListFilterTags(sl.filterData)
+            if tagNames.isEmpty {
+                fail("unsupportedFilter", "智能列表「\(sl.name ?? "")」的过滤条件暂不支持求值（当前仅支持 hashtags）；filterData: \(sl.filterData ?? "nil")")
+            }
+            filtered = filtered.filter { rem in
+                let remTags = (rem.tags ?? []).map { $0.lowercased() }
+                return tagNames.contains { t in remTags.contains(t.lowercased()) }
+            }
+        } else if let listId {
             let matches = data.calendars.filter { $0.id == listId || $0.id.lowercased().hasPrefix(listId.lowercased()) }
             if matches.isEmpty {
                 fail("noSuchList", "找不到列表：\(listId)")
@@ -180,5 +204,20 @@ struct Query: ParsableCommand {
         for r in items where r.parentId != nil && !ids.contains(r.parentId!) {
             print("  \(r.title)")
         }
+    }
+
+    /// Parse hashtag names out of a smart list's filterData JSON string.
+    /// Supports the shape Reminders.app writes for a tag filter:
+    /// {"hashtags":{"hashtags":["标签"]}}. Returns [] for other filter kinds
+    /// (dates/priority/etc. — not yet evaluable, caller reports the gap).
+    private func smartListFilterTags(_ filterData: String?) -> [String] {
+        guard let filterData, let data = filterData.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let dict = obj as? [String: Any],
+              let hashtags = dict["hashtags"] as? [String: Any],
+              let names = hashtags["hashtags"] as? [String] else {
+            return []
+        }
+        return names
     }
 }
