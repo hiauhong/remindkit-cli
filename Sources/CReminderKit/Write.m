@@ -1528,36 +1528,50 @@ static NSDictionary *opMoveList(id store, NSDictionary *req) {
     NSString *typeFilter = req[@"type"];
     BOOL wantSmart = (typeFilter.length > 0 &&
                       [typeFilter.lowercaseString isEqualToString:@"smartlist"]);
+    BOOL wantGroup = (typeFilter.length > 0 &&
+                      [typeFilter.lowercaseString isEqualToString:@"group"]);
 
-    // Resolve the target: --type smartlist pins the smart-list family;
-    // otherwise regular list first, then smart list as fallback.
+    // Resolve the target: --type smartlist/group pins that family; otherwise
+    // regular list first, then smart list, then group (folder) as fallback.
+    // All three families share the account's listIDsOrdering for sorting.
     id list = nil;
     id smartList = nil;
+    id group = nil;
     NSDictionary *listErr = nil;
     NSDictionary *slErr = nil;
-    if (!wantSmart) {
+    NSDictionary *groupErr = nil;
+    if (!wantSmart && !wantGroup) {
         list = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
     }
-    if (!list) {
+    if (!list && !wantGroup) {
         smartList = resolveSmartList(store, req[@"listID"], req[@"listName"], &slErr);
-        if (!smartList && wantSmart) return slErr;
-        if (!smartList && !list) return listErr;
+    }
+    if (!list && !smartList) {
+        group = resolveGroup(store, req[@"listID"], req[@"listName"], &groupErr);
+    }
+    if (!list && !smartList && !group) {
+        if (wantSmart) return slErr;
+        if (wantGroup) return groupErr;
+        return listErr;
     }
 
     NSNumber *order = req[@"order"];
     if (order == nil) {
         // No sorting requested → must be a group move, which needs a regular list.
+        if (group) {
+            return @{@"ok": @NO, @"error": @"分组不支持进出分组（文件夹是容器顶层）；排序请用 --order N"};
+        }
         if (!list) {
             return @{@"ok": @NO, @"error": @"智能列表不支持进出分组（父分组由创建时指定）；排序请用 --order N"};
         }
     }
 
-    // Unified ordering path (regular + smart lists): reorder within the
-    // account's listIDsOrdering. The target position is an index into that
+    // Unified ordering path (regular + smart lists + groups): reorder within
+    // the account's listIDsOrdering. The target position is an index into that
     // global ordering (0-based). 末尾 = dump 的 listIDsOrdering 长度 - 1。
     if (order != nil) {
-        NSString *targetUUID = extractUUID(
-            list ? [list valueForKey:@"objectID"] : [smartList valueForKey:@"objectID"]);
+        id target = list ?: (smartList ?: group);
+        NSString *targetUUID = extractUUID([target valueForKey:@"objectID"]);
         NSError *err = nil;
         id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
         id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
@@ -1587,8 +1601,8 @@ static NSDictionary *opMoveList(id store, NSDictionary *req) {
         if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
         NSMutableDictionary *out = [NSMutableDictionary dictionaryWithDictionary:@{
             @"ok": @YES, @"id": targetUUID,
-            @"name": (list ? [list valueForKey:@"name"] : [smartList valueForKey:@"name"]) ?: @"",
-            @"type": list ? @"list" : @"smartList"
+            @"name": [target valueForKey:@"name"] ?: @"",
+            @"type": list ? @"list" : (smartList ? @"smartList" : @"group")
         }];
         if (order) out[@"order"] = order;
         if (moved) out[@"moved"] = @YES;

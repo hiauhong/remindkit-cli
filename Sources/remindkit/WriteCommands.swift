@@ -1439,7 +1439,7 @@ struct MoveList: ParsableCommand {
     @Option(name: .long, help: "Display order (index into the sidebar list ordering; get the length from dump listIDsOrdering)")
     var order: Int?
 
-    @Option(name: .long, help: "Entity type to narrow resolution: list | smartlist (--type smartlist disambiguates same-named smart lists)")
+    @Option(name: .long, help: "Entity type to narrow resolution: list | smartlist | group (disambiguates same-named entities)")
     var type: String?
 
     func validate() throws {
@@ -1453,9 +1453,9 @@ struct MoveList: ParsableCommand {
             throw ValidationError("specify --to-group/--to-group-id, --out-of-group, or --order")
         }
         if let type {
-            let allowed = ["list", "smartlist"]
+            let allowed = ["list", "smartlist", "group"]
             guard allowed.contains(type.lowercased()) else {
-                throw ValidationError("--type 只接受 list | smartlist（收到：\(type)）")
+                throw ValidationError("--type 只接受 list | smartlist | group（收到：\(type)）")
             }
         }
     }

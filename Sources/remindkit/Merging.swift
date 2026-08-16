@@ -16,7 +16,7 @@ func fetchEnrichedData(includeSections: Bool = true) -> EnrichedData {
        let rawReminders = rk.reminders {
         return EnrichedData(
             reminders: mergedReminders(from: rawReminders),
-            calendars: mergedCalendars(from: rk.lists ?? []),
+            calendars: applySidebarOrder(mergedCalendars(from: rk.lists ?? []), ordering: rk.listIDsOrdering ?? []),
             smartLists: mergedSmartLists(rk),
             listIDsOrdering: rk.listIDsOrdering ?? [],
             source: .reminderKit
@@ -51,7 +51,7 @@ func fetchListStructure() -> EnrichedData {
        let rawLists = rk.lists {
         return EnrichedData(
             reminders: [],
-            calendars: mergedCalendars(from: rawLists),
+            calendars: applySidebarOrder(mergedCalendars(from: rawLists), ordering: rk.listIDsOrdering ?? []),
             smartLists: mergedSmartLists(rk),
             listIDsOrdering: rk.listIDsOrdering ?? [],
             source: .reminderKit
@@ -119,6 +119,34 @@ func mergedCalendars(from lists: [ListRaw]) -> [CalendarEntry] {
             sections: l.sections,
             parentUUID: (parentUUID != nil && parentUUID != "null") ? parentUUID : nil,
             order: idx
+        )
+    }
+}
+
+/// Reorder calendars (lists + groups) into the account's sidebar order
+/// (`listIDsOrdering`) and renumber `order` to the resulting position.
+///
+/// Apple keeps two orderings: the account-level `listIDsOrdering`
+/// (authoritative for the sidebar) and a per-entity order property that can
+/// go stale after programmatic reordering — 2026-08-16: `move-list --order`
+/// on a group updated listIDsOrdering but not the group's order property, so
+/// raw enumeration order diverged from the app. Rendering from the ordering
+/// array keeps every structure view (list --brief/json, dump, note) in sync
+/// with the real sidebar. Entities missing from the ordering (should not
+/// happen for real lists) stay at the end in their original relative order.
+func applySidebarOrder(_ calendars: [CalendarEntry], ordering: [String]) -> [CalendarEntry] {
+    guard !ordering.isEmpty else { return calendars }
+    let pos = Dictionary(uniqueKeysWithValues: ordering.enumerated().map { ($0.element, $0.offset) })
+    return calendars.enumerated().sorted { a, b in
+        let pa = pos[a.element.id] ?? Int.max
+        let pb = pos[b.element.id] ?? Int.max
+        return pa != pb ? pa < pb : a.offset < b.offset
+    }.enumerated().map { (i, pair) in
+        let e = pair.element
+        return CalendarEntry(
+            id: e.id, title: e.title, isGroup: e.isGroup,
+            icon: e.icon, color: e.color, sections: e.sections,
+            parentUUID: e.parentUUID, order: i
         )
     }
 }

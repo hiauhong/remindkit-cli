@@ -20,6 +20,7 @@ allowed-tools:
 ## 当前列表结构（新增/归属路由先看这里，不必再跑 list）
 
 > **新增/移动/归属判断前，只跑一次 `remindkit list --brief`**（~4KB：分组层级 + 列表名 + 备注 + 分区名），输出即权威结构，直接据此选列表+分区。**不要**再逐个 query 候选列表的条目对比——note + 分区已足够决策。只有真模糊（两个列表都说得通）才允许查条目。
+> 结构视图（list --brief/json、dump calendars、note）统一按 `listIDsOrdering`（App 侧边栏的权威排序）渲染，与 App 所见一致（2026-08-16 修复：分组经 `move-list --order` 排序后 Apple 的 order 属性会过期，不再按它排）。
 
 !`remindkit list --brief`
 
@@ -51,7 +52,7 @@ allowed-tools:
 | 到期日期区间 | `remindkit query --due-after 2026-08-01 --due-before 2026-09-01` | |
 | 数量统计（全局/按列表） | `remindkit count [--list X]` | 省 token 首选 |
 | 每个列表的统计表 | `remindkit count --by-list` | 一次拿到全部列表统计，勿循环 count |
-| 有哪些列表/群组/分区 | `remindkit list` / `remindkit list --groups` / `remindkit list --brief`（紧凑结构，含分区名+备注） | |
+| 有哪些列表/群组/分区 | `remindkit list` / `remindkit list --groups` / `remindkit list --brief`（紧凑结构，含分区名+备注；**末尾自动附带「🔍 智能列表」区块**） | |
 | **新增提醒（先看结构再写）** | `remindkit list --brief` 定列表+分区 → `remindkit add "…" --list <标题或--list-id UUID> --section <分区>` | **add 响应自带 `listTitle`+`section` 回显，无需再验证 query**；重名列表用 `--list-id` 精确定位 |
 | 全量导出 | `remindkit dump > reminders.json` | 数据量大，谨慎；`dump.smartLists` 默认只含自定义（`type: custom`）；系统智能列表（今天/旗标/已完成/已分配）是虚拟视图、事项都在普通列表里，默认不输出，`dump --system-smartlists` 才包含；「计划」无实体，用 `scheduled` 命令 |
 | 调整列表内任务顺序 | `remindkit reorder <id> --before <同级ID>` / `--after` / `--first`（置顶） / `--last`（置底） | 相对移动，锚点须在同一列表；子任务不支持（v1） |
@@ -144,7 +145,7 @@ remindkit note --list 焦点 --set "重要事项"         # 智能列表也可�
 remindkit note --list <UUID前缀> --set "..."      # 智能列表 UUID 前缀
 # 智能列表：系统（今天/旗标/已完成/已分配）+ 自定义均可读可写；note --all 输出带 isSmartList/smartListType 标识
 # 存储：~/.local/share/remindkit/notes.json（可用 REMINDKIT_NOTES_FILE 改路径，如放 iCloud Drive 自动同步）
-# list --format json 输出携带 id/title/icon/color/sections/parentTitle/note/order（一次拿全结构）
+# list --format json 输出携带 id/title/icon/color/sections/parentTitle/note/order（一次拿全结构）；--smart-lists 时输出 {lists, smartLists} 容器（智能列表含 filterData）
 # list --format plain（树形）和 count --by-list 的输出也会自动携带每个列表的 note 字段
 
 # 列表用途标注（agent 非交互流程，不跑 setup）
@@ -257,9 +258,10 @@ remindkit query --smart-list "日用品" --fields id,title,listTitle    # 求值
 # 注意：智能列表可与普通列表同名（防误删）；同名时写侧用 --list-id/--id 精确定位；智能列表分区与普通列表分区是两套视图维度
 remindkit move-list "项目A" --to-group "工作"      # 已有列表移入分组（--to-group-id 也可；仅普通列表）
 remindkit move-list "项目A" --out-of-group         # 移出分组到顶层（仅普通列表）
-remindkit move-list "数码" --order 20 --type smartlist  # 移到排序索引 20（普通/智能列表统一走 listIDsOrdering；--type smartlist 逃生门同 update-list）
+remindkit move-list "数码" --order 20 --type smartlist  # 移到排序索引 20（普通/智能列表/分组统一走 listIDsOrdering；--type smartlist/group 逃生门同 update-list）
 # 排序索引 0..N-1（N = dump 的 listIDsOrdering 长度）；末尾 = N-1；移末尾：先 dump 拿长度再 --order N-1
-# 智能列表不支持进出分组（父分组创建时指定），--to-group/--out-of-group 对智能列表报错
+# 分组（文件夹）也支持 --order 排序（2026-08-16 扩展）：move-list "收入支出" --order 13 把文件夹插到顶层列表之后
+# 智能列表不支持进出分组（父分组创建时指定），--to-group/--out-of-group 对智能列表报错；分组不支持进出分组，--to-group/--out-of-group 对分组报错
 # 分组也能删除：remindkit delete-list "工作" --yes（组内列表随之删除）
 # 注意：苹果文件夹不支持嵌套（单层）；子任务只支持一层父子（苹果原生限制）
 ```
