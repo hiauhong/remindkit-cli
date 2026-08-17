@@ -109,7 +109,7 @@ public enum RemindKitError: LocalizedError {
         switch self {
         case .accessDenied(let host):
             let hostSuffix = host.map { " (host: \($0))" } ?? ""
-            return "Apple Reminders access denied\(hostSuffix). Grant Reminders access to the host app in System Settings > Privacy & Security > Reminders, or run 'remindkit doctor'."
+            return "Apple Reminders access denied\(hostSuffix). Run 'remindkit authorize' to trigger the permission prompt. If it was previously denied, reset first: tccutil reset Reminders, then run 'remindkit authorize' again."
         case .subprocessNotFound:
             return "CReminderKit subprocess binary not found"
         }

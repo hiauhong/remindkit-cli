@@ -109,8 +109,10 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - 运行时错误（如权限被拒、找不到列表/提醒）输出到 **stderr** 的 JSON：`{"error":{"code":"…","message":"…"}}`，退出码 1；**用法错误（缺参数/互斥/格式错）是普通文本 + usage，退出码 64（非 JSON）**——agent 按退出码区分，别假设 stderr 永远可 `jq` 解析。**读侧与写侧同契约**。
 - **列表不存在**：`--list`/`--list-id`/`--to-id`/`--group-id` 匹配不到时退出码 1，stderr：`{"error":{"code":"noSuchList","message":"…"}}`（有近似候选时 message 附带 Did you mean 提示）。写侧业务码：noSuchList / noSuchReminder / noSuchGroup / noSuchAccount / noSuchDeletedRecord / noSuchSection / reminderKitError / unsupportedByEventKit / readOnly。
 - macOS 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制。
-- 权限问题先跑 `remindkit doctor --for-agent --json`，按 `fix` 提示操作（给宿主授权）。
+- **新宿主首次使用（access: notDetermined）**：默认数据路径（ReminderKit 子进程）**从不触发授权弹窗**，未授权时静默返回空数据——普通查询命令永远不会弹窗。必须显式 `remindkit authorize`（或 `doctor --authorize`）调用 EventKit 授权路径触发系统弹窗；agent 用 `remindkit authorize --check --json` 非交互查状态，`--verify` 授权后验证主路径可读。
+- 权限问题先跑 `remindkit doctor --for-agent --json`，按 `fix` 提示操作；`denied` 时先 `tccutil reset Reminders` 再 `authorize`（系统设置对无 GUI 宿主无效）。
 - 若 `doctor` 显示 `access: granted` 但命令仍失败，检查是否有 `--format`/参数拼写问题。
+- **写操作预检**：add/update 等写命令在权限未授权时直接报 `accessDenied`（不自动弹窗），按提示运行 `remindkit authorize`。
 
 ## 命令示例
 
@@ -168,6 +170,10 @@ remindkit dump --pretty > reminders-pretty.json   # 人读用
 
 # 诊断
 remindkit doctor --for-agent --json
+remindkit authorize                    # 新宿主首次：触发 macOS 授权弹窗（唯一有效路径）
+remindkit authorize --check --json     # 非交互查权限状态（granted/notDetermined/denied/restricted）
+remindkit authorize --verify           # 授权后验证主路径（ReminderKit 子进程）可读
+remindkit doctor --authorize           # doctor 第二入口，同 authorize
 ```
 
 ## 写操作（谨慎使用）

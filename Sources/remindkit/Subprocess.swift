@@ -27,6 +27,28 @@ func guardWriteEnabled() {
     }
 }
 
+/// Pre-flight permission check for write operations: when access is not yet
+/// granted, fail with `accessDenied` and point at `remindkit authorize`.
+/// Never auto-prompt from a write path — the authorization dialog must be
+/// triggered only by the explicit `authorize` command (writes stay
+/// side-effect-free), and the default ReminderKit subprocess path never
+/// requests access anyway.
+func guardRemindersAccess() {
+    switch RemindersAuth.checkAccessState() {
+    case .granted:
+        return
+    case .notDetermined:
+        fail("accessDenied",
+             "Apple Reminders 权限尚未授权（host: \(responsibleProcessName())）。运行 'remindkit authorize' 触发授权弹窗。")
+    case .denied:
+        fail("accessDenied",
+             "Apple Reminders 权限被拒绝（host: \(responsibleProcessName())）。先重置：tccutil reset Reminders，再运行 'remindkit authorize'。")
+    case .restricted:
+        fail("accessDenied",
+             "Apple Reminders 权限受策略限制（如 MDM）。")
+    }
+}
+
 func fail(_ code: String, _ message: String, exitCode: Int32 = 1) -> Never {
     let payload: [String: Any] = ["error": ["code": code, "message": message]]
     let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()

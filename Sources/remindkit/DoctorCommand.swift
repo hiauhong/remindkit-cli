@@ -14,7 +14,17 @@ struct Doctor: ParsableCommand {
     @Flag(name: .long, help: "Report from the agent host context")
     var forAgent: Bool = false
 
+    @Flag(name: .long, help: "Request Reminders permission now (triggers the system authorization prompt)")
+    var authorize: Bool = false
+
     func run() throws {
+        // doctor --authorize: delegate to the shared authorize logic
+        // (second entry point alongside the standalone `authorize` command).
+        if authorize {
+            try runAuthorize(check: false, verify: false, json: json)
+            return
+        }
+
         let access = RemindersAuth.checkAccessState()
         let host = responsibleProcessName()
         let binary = CommandLine.arguments[0]
@@ -58,9 +68,9 @@ struct Doctor: ParsableCommand {
         case .granted:
             return "OK"
         case .notDetermined:
-            return "Run any command once from this host (\(host)) and approve the Reminders prompt, or grant access in System Settings > Privacy & Security > Reminders."
+            return "Run 'remindkit authorize' (or 'doctor --authorize') to trigger the macOS permission prompt. The default data path (ReminderKit subprocess) never requests access, so running any read command will NOT prompt."
         case .denied:
-            return "Grant Reminders access to '\(host)' in System Settings > Privacy & Security > Reminders. Open: open x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders"
+            return "Reminders access denied for '\(host)'. Reset TCC and retry: tccutil reset Reminders && remindkit authorize (System Settings cannot grant access to a headless host)."
         case .restricted:
             return "Reminders access is restricted by policy (e.g. MDM)."
         }

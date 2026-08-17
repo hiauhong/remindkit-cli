@@ -34,6 +34,7 @@ func failReminderKitError(_ rk: [String: Any]) -> Never {
 /// the write, and retrying through EventKit could duplicate or double-apply it.
 func writeWithReminderKit(_ request: [String: Any],
                           fallback: () throws -> [String: Any]) throws -> (source: String, result: [String: Any]) {
+    guardRemindersAccess()
     switch runReminderKitWrite(request) {
     case .success(let rk):
         if let ok = rk["ok"] as? Bool, ok {
@@ -771,6 +772,7 @@ struct Restore: ParsableCommand {
 
     func run() throws {
         guardWriteEnabled()
+        guardRemindersAccess()
         let record = loadDeletedCache().first { $0.id == id }
         guard let record else {
             fail("noSuchDeletedRecord", "找不到删除记录：\(id)。用 recently-deleted 查看可恢复的提醒。")
