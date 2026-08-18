@@ -131,6 +131,7 @@ remindkit query --all --fields id,title,dueDate --format json   # 只取需要�
 remindkit query --completed --completed-after 2026-08-01 --fields id,title,completionDate \
   # 按完成日期过滤（月度/周报回顾）：--completed-after / --completed-before（YYYY-MM-DD [HH:MM]）
 remindkit query --list <列表> --fields id,title,listTitle   # 列表归属投影，无需本地 join
+remindkit query --list <列表> --section <分区名> --fields id,title   # 分区级过滤（需 --list/--list-id/--smart-list；迁移归位验证用它）
 remindkit dump --fields id,title,dueDate,completed > slim.json  # dump 也只投影 reminders
 remindkit query --due-before 2026-08-01 --all --format json
 remindkit count --list 工作
@@ -228,6 +229,7 @@ remindkit update <id> --parent <父提醒ID>   # 把普通任务挂为父任务�
 remindkit update <id> --no-parent           # 解除父子关系（子任务变回普通任务，留在原列表）
 remindkit delete <id>          # 软删除 → 最近删除（30 天后系统清除）；无 EventKit 兜底（需 ReminderKit 子进程，避免硬删）
 remindkit move <id> --to 测试列表2   # 真移动：ID 保留、子树完整迁移（不复制不删、不进最近删除）
+remindkit move <id> --to 测试列表2 --section 分区名   # 一步迁移并归位到目标列表分区（分区须已存在：先 add-section；EventKit 兜底时标记 degraded）
 remindkit reorder <id> --first          # 移到列表顶部
 remindkit reorder <id> --last           # 移到列表底部
 remindkit reorder <id> --before <同级提醒ID>   # 移到某提醒前面（锚点须同一列表）

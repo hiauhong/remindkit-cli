@@ -56,6 +56,9 @@ struct Query: ParsableCommand {
     @Flag(name: .long, help: "Skip section lookup (faster; default: auto)")
     var noSections: Bool = false
 
+    @Option(name: .long, help: "Filter by section name (requires --list / --list-id / --smart-list)")
+    var section: String?
+
     @Flag(name: .long, help: "Print as a hierarchy tree: section → task → subtasks (requires --list)")
     var tree: Bool = false
 
@@ -63,10 +66,13 @@ struct Query: ParsableCommand {
         if completed && all {
             throw ValidationError("--completed and --all are mutually exclusive")
         }
+        if section != nil && list == nil && listId == nil && smartList == nil {
+            throw ValidationError("--section requires --list, --list-id, or --smart-list (sections are list-scoped)")
+        }
     }
 
     func run() throws {
-        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections || tree, disable: noSections, hasList: list != nil || listId != nil || smartList != nil))
+        let data = fetchEnrichedData(includeSections: sectionsEnabled(force: sections || tree || section != nil, disable: noSections, hasList: list != nil || listId != nil || smartList != nil))
 
         var filtered = data.reminders
         // Which calendars the --list/--list-id filter resolved to (used by
@@ -116,6 +122,11 @@ struct Query: ParsableCommand {
         if let tagFilter = tag {
             let t = tagFilter.lowercased()
             filtered = filtered.filter { ($0.tags ?? []).contains { $0.lowercased() == t } }
+        }
+
+        if let sectionFilter = section {
+            // 分区过滤：精确匹配 reminder.section（sections 已在上面强制加载）。
+            filtered = filtered.filter { $0.section == sectionFilter }
         }
 
         filtered = try applyCompletionScope(filtered, completed: completed, all: all)

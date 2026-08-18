@@ -820,11 +820,26 @@ static NSDictionary *opMove(id store, NSDictionary *req) {
             }
         }
     }
+    // --section: file the moved reminder into a section of the TARGET list in
+    // the same save request (REMMembership on the sections context change item,
+    // same mechanism as add/update). Reuses setReminderSection, which validates
+    // the section exists and guides "先用 add-section 创建" on miss.
+    NSString *sectionName = req[@"section"];
+    if (sectionName.length > 0) {
+        NSString *rootKey = [[reminder valueForKey:@"objectID"] description];
+        id rootCI = parentCIByID[rootKey];
+        NSDictionary *secErr = setReminderSection(store, saveReq, toList, rootCI, sectionName);
+        if (secErr) return secErr;
+    }
     NSError *err = nil;
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
     // True move keeps the identifier — no copy, no deletion, no recently-deleted entry.
     NSString *resolvedToName = [toList valueForKey:@"name"];
-    return @{@"ok": @YES, @"id": extId, @"toList": resolvedToName ?: toName ?: @""};
+    NSMutableDictionary *resp = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"ok": @YES, @"id": extId, @"toList": resolvedToName ?: toName ?: @""
+    }];
+    if (sectionName.length > 0) resp[@"section"] = sectionName;  // 回显落点，agent 零验证成本
+    return resp;
 }
 
 // MARK: - Entry

@@ -1044,6 +1044,9 @@ struct Move: ParsableCommand {
     @Option(name: .long, help: "Target list ID (preferred; disambiguates same-named lists)")
     var toId: String?
 
+    @Option(name: .long, help: "Move to a section of the target list (must exist; use add-section first)")
+    var section: String?
+
     func run() throws {
         guardWriteEnabled()
         guard to != nil || toId != nil else {
@@ -1052,6 +1055,7 @@ struct Move: ParsableCommand {
         var request: [String: Any] = ["op": "move", "id": id, "author": "remindkit"]
         if let to { request["toListName"] = to }
         if let toId { request["toListID"] = toId }
+        if let section, !section.isEmpty { request["section"] = section }
 
         let (source, result) = try writeWithReminderKit(request) {
             let store = RemindersAuth.requestAccessSync()
@@ -1061,7 +1065,12 @@ struct Move: ParsableCommand {
             // toId 优先；都走严格解析（重名/前缀冲突报 ambiguousList）
             let target = try ekResolveList(toId ?? to ?? "", writer: writer)
             try writer.move(reminder, to: target)
-            return ["id": id, "from": fromTitle, "to": target.title]
+            var dict: [String: Any] = ["id": id, "from": fromTitle, "to": target.title]
+            if let section, !section.isEmpty {
+                // EventKit 公共 API 不支持分区（sections 是 ReminderKit-only），标记降级让 agent 知道分区未生效
+                dict["degraded"] = true
+            }
+            return dict
         }
 
         var out: [String: Any] = ["ok": true, "source": source]

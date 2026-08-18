@@ -330,6 +330,36 @@ import json,sys; print(json.load(sys.stdin).get('error', {}).get('message', 'no-
 STDERR=$("$BIN" count 2>&1 >/dev/null)
 check "successful run leaves stderr clean" "" "$STDERR"
 
+# ── move --section / query --section（跨列表迁移一步归位）──────────────
+# 独立流程：自建列表 C + 分区，把 LIST_A 里的提醒一步迁入分区；
+# 校验响应回显（toList+section）、query --section 归位验证、未建分区引导、
+# query --section 缺 --list 报错。列表 C 由 cleanup 统一清除。
+SEC_LIST="测试冒烟C$TAG"
+SEC_NAME="测试冒烟分区$TAG"
+SEC_LIST_ID=$("$BIN" add-list "$SEC_LIST" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+check "move-section: target list created" "ok" "$(test -n "$SEC_LIST_ID" && echo ok || echo no)"
+"$BIN" add-section "$SEC_LIST" "$SEC_NAME" >/dev/null 2>&1
+MVREM=$("$BIN" add "冒烟迁移$TAG" --list-id "$LIST_A_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+check "move-section: source reminder added" "ok" "$(test -n "$MVREM" && echo ok || echo no)"
+
+check "move --section files into target section (echo)" "ok" "$("$BIN" move "$MVREM" --to "$SEC_LIST" --section "$SEC_NAME" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('section')=='$SEC_NAME' and d.get('toList')=='$SEC_LIST' else 'bad:'+json.dumps(d))")"
+
+OUT=$("$BIN" query --list "$SEC_LIST" --section "$SEC_NAME" --format json)
+check "query --section shows moved reminder" "ok" "$(echo "$OUT" | python3 -c "
+import json,sys
+rs=[r for r in json.load(sys.stdin) if r['id']=='$MVREM']
+print('ok' if len(rs)==1 and rs[0].get('section')=='$SEC_NAME' else 'bad')")"
+
+BAD=$("$BIN" move "$MVREM" --to "$SEC_LIST" --section "不存在分区$TAG" 2>&1 || true)
+check "move --section missing section guides add-section" "ok" "$(echo "$BAD" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if '先用 add-section' in d.get('error', {}).get('message', '') else 'bad')")"
+
+ERR=$("$BIN" query --section "$SEC_NAME" 2>&1 || true)
+check "query --section requires --list" "ok" "$(echo "$ERR" | grep -q 'requires --list' && echo ok || echo bad)"
+
 # ── Final hygiene: nothing we created may remain ────────────────────────────
 # cleanup runs explicitly here (and again via trap on exit; it is idempotent).
 cleanup
