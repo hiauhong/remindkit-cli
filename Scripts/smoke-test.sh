@@ -360,6 +360,19 @@ print('ok' if '先用 add-section' in d.get('error', {}).get('message', '') else
 ERR=$("$BIN" query --section "$SEC_NAME" 2>&1 || true)
 check "query --section requires --list" "ok" "$(echo "$ERR" | grep -q 'requires --list' && echo ok || echo bad)"
 
+# bulk --op move --section：批量迁移一步归位（同一 opMove 路径，选择器=列表+标签）
+BULKREM=$("$BIN" add "冒烟批量$TAG" --list-id "$LIST_A_ID" --tag bulksec | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+check "bulk-section: source added" "ok" "$(test -n "$BULKREM" && echo ok || echo no)"
+BRES=$("$BIN" bulk --op move --to "$SEC_LIST" --section "$SEC_NAME" --list "$LIST_B" --tag bulksec --yes | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('succeeded')==1 else 'bad:'+json.dumps(d))")
+check "bulk --op move --section files into target section" "ok" "$BRES"
+OUT=$("$BIN" query --list "$SEC_LIST" --section "$SEC_NAME" --format json)
+check "bulk-section: query verifies placement" "ok" "$(echo "$OUT" | python3 -c "
+import json,sys
+rs=[r for r in json.load(sys.stdin) if r['id']=='$BULKREM']
+print('ok' if len(rs)==1 and rs[0].get('section')=='$SEC_NAME' else 'bad')")"
+
 # ── Final hygiene: nothing we created may remain ────────────────────────────
 # cleanup runs explicitly here (and again via trap on exit; it is idempotent).
 cleanup

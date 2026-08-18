@@ -277,3 +277,79 @@ remindkit move-list "数码" --order 20 --type smartlist  # 移到排序索引 2
 > 写响应含 `source`：`reminderKit`（主）或 `eventKit`（兜底，`degraded: true` 表示标签/紧急/子任务/url/提醒/位置等字段未写）。
 > 写前子进程超时/无输出会报 `writeResultUnknown`（结果未知，不盲目走兜底，避免重复写入）。
 > 写后可用查询命令验证（读走 ReminderKit 子进程）。
+
+## 场景配方（照着抄：前置 → 执行 → 验证）
+
+> 高频端到端流程。每行命令都过契约测试；组合使用仍守「先看结构再写」纪律。
+> 通用安全网：写前 `list --brief` 看结构；批量/破坏性操作先 `--dry-run`；完成后 `query`/`count` 验证。
+
+### 场景 1：迁移任务到另一列表的分区
+
+```bash
+# 前置：看结构，确认目标列表与分区（结构即领域模型，只跑一次）
+remindkit list --brief
+# 目标分区不存在则先建（分区名=分类框架，先想清楚语义）
+remindkit add-section "目标列表" "分区名"
+# 执行：一步迁移并归位（响应回显 toList+section，无需再验证）
+remindkit move <id> --to "目标列表" --section "分区名"
+# 验证：分区过滤确认归位
+remindkit query --list "目标列表" --section "分区名" --fields id,title
+# 源列表确认已空后删除（永久操作，--yes）
+remindkit query --list "源列表" --format count
+remindkit delete-list "源列表" --yes
+```
+
+### 场景 2：批量结构整理（迁移/打标/完成）
+
+```bash
+# 前置：条件选择目标集合，确认命中范围（默认只看未完成，--all 含已完成）
+remindkit query --list "源列表" --tag 闲置 --fields id,title,section
+# 执行：先 --dry-run 预览，再 --yes 执行（move 是破坏性写；--limit 默认 50，超出拒绝）
+remindkit bulk --op move --to "目标列表" --section "分区名" --list "源列表" --tag 闲置 --dry-run
+remindkit bulk --op move --to "目标列表" --section "分区名" --list "源列表" --tag 闲置 --limit 50 --yes
+# 批量打标签 / 批量完成同理（update 至少带一个更新字段；complete 无需 --yes）
+remindkit bulk --op update --tag-add 已归档 --list "目标列表" --tag 闲置 --yes
+remindkit bulk --op complete --list "目标列表" --tag 闲置
+# 验证：目标分区数量 + 源列表复查
+remindkit query --list "目标列表" --section "分区名" --format count
+remindkit query --list "源列表" --format count
+```
+
+### 场景 3：每日精选 / 今日规划
+
+```bash
+remindkit overview --format json       # 今天/过期/未来 7 天/旗标/紧急 摘要（先看全局）
+remindkit today --format json          # 今天到期（未完成）
+remindkit flagged --format json        # 旗标焦点（最近关注）
+remindkit overdue --format json        # 过期未完成
+```
+
+### 场景 4：每周复盘
+
+```bash
+# 本周完成的（按完成日期过滤；YYYY-MM-DD）
+remindkit query --completed --completed-after 2026-08-11 --completed-before 2026-08-18 --fields id,title,completionDate --format json
+# 每列表统计（一次拿全，勿循环 count）
+remindkit count --by-list
+```
+
+### 场景 5：新增任务并归位
+
+```bash
+# 前置：定列表+分区（结构是领域模型，别凭记忆写）
+remindkit list --brief
+remindkit add "买牛奶" --list "购物" --section "食品" --due "2026-08-18 18:00" --tag 日常
+remindkit add "写周报" --list "工作" --priority high --repeat weekly --days fri
+# 子任务：父须同列表、本身非子任务、无子任务（苹果原生限制）
+remindkit add "整理数据" --list "工作" --parent <父任务ID>
+```
+
+### 场景 6：权限故障排查
+
+```bash
+remindkit authorize --check --json     # 非交互查状态（granted/notDetermined/denied/restricted）
+remindkit authorize                    # 触发授权弹窗（唯一有效路径；新宿主首次必做）
+remindkit doctor --for-agent --json    # 权限+责任进程+子进程二进制+修复指引
+# denied 时先重置再授权（系统设置对无 GUI 宿主无效）：
+#   tccutil reset Reminders && remindkit authorize
+```

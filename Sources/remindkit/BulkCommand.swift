@@ -45,6 +45,9 @@ struct Bulk: ParsableCommand {
     @Option(name: .long, help: "Target list for move (name or ID)")
     var to: String?
 
+    @Option(name: .long, help: "move: file into a section of the target list (must exist; use add-section first)")
+    var section: String?
+
     @Flag(name: .long, help: "update: set the flag")
     var flag: Bool = false
 
@@ -204,14 +207,20 @@ struct Bulk: ParsableCommand {
             return ["source": source]
         case "move":
             guard let to else { throw ValidationError("move 需要 --to") }
-            let request: [String: Any] = ["op": "move", "id": id, "toListName": to, "author": "remindkit"]
+            var request: [String: Any] = ["op": "move", "id": id, "toListName": to, "author": "remindkit"]
+            if let section, !section.isEmpty { request["section"] = section }
             let (source, result) = try writeWithReminderKit(request) {
                 let store = RemindersAuth.requestAccessSync()
                 let writer = RemindersWriter(store: store)
                 guard let ek = writer.reminder(id: id) else { fail("noSuchReminder", "找不到提醒：\(id)") }
                 let target = try ekResolveList(to, writer: writer)
                 try writer.move(ek, to: target)
-                return ["to": target.title]
+                var dict: [String: Any] = ["to": target.title]
+                if let section, !section.isEmpty {
+                    // EventKit 公共 API 不支持分区，标记降级让 agent 知道分区未生效
+                    dict["degraded"] = true
+                }
+                return dict
             }
             var dict: [String: Any] = ["source": source]
             // move preserves the reminder's identifier (true re-parent via
