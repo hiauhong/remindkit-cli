@@ -276,14 +276,27 @@ static id makeHashtag(id accountID, id reminderObjectID, NSString *name) {
         htObjID, accountID, reminderObjectID, 0, name);
 }
 
-static NSDateComponents *epochToComponents(NSNumber *epoch) {
+static NSDateComponents *epochToComponents(NSNumber *epoch, BOOL isAllDay) {
     if (!epoch) return nil;
     NSDate *date = [NSDate dateWithTimeIntervalSince1970:epoch.doubleValue];
     NSCalendar *cal = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
     cal.timeZone = NSTimeZone.localTimeZone;
-    return [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
-                             NSCalendarUnitHour | NSCalendarUnitMinute)
-                  fromDate:date];
+    // All-day reminders carry only year/month/day (no hour/minute) — that's
+    // how ReminderKit derives the allDay flag from dueDateComponents.
+    NSCalendarUnit units = isAllDay
+        ? (NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay)
+        : (NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
+           NSCalendarUnitHour | NSCalendarUnitMinute);
+    return [cal components:units fromDate:date];
+}
+
+/// Whether a request should set an all-day due/start date: explicit allDay
+/// flag wins; otherwise a pure YYYY-MM-DD string (no "HH:MM" time part)
+/// means all-day, matching the CLI's documented --due semantics.
+static BOOL requestIsAllDay(NSDictionary *req, NSString *key) {
+    if (req[@"allDay"] != nil) return [req[@"allDay"] boolValue];
+    id raw = req[key];
+    return [raw isKindOfClass:[NSString class]] && [(NSString *)raw rangeOfString:@":"].location == NSNotFound;
 }
 
 // MARK: - Operations
@@ -301,10 +314,19 @@ static NSDictionary *opAdd(id store, NSDictionary *req) {
     id remCI = ((id(*)(id, SEL, id, id))objc_msgSend)(saveReq,
         NSSelectorFromString(@"addReminderWithTitle:toListChangeItem:"), req[@"title"] ?: @"", listCI);
 
-    NSDateComponents *due = epochToComponents(req[@"due"]);
-    if (due) { [remCI setValue:due forKey:@"dueDateComponents"]; }
-    NSDateComponents *start = epochToComponents(req[@"start"]);
-    if (start) { [remCI setValue:start forKey:@"startDateComponents"]; }
+    NSDateComponents *due = epochToComponents(req[@"due"], [req[@"allDay"] boolValue]);
+    if (due) {
+        [remCI setValue:due forKey:@"dueDateComponents"];
+        // allDay is a stored flag on the change item; keep it in sync so an
+        // all-day request stays all-day (hour/minute stripped above and the
+        // flag set explicitly).
+        [remCI setValue:@([req[@"allDay"] boolValue]) forKey:@"allDay"];
+    }
+    NSDateComponents *start = epochToComponents(req[@"start"], [req[@"allDay"] boolValue]);
+    if (start) {
+        [remCI setValue:start forKey:@"startDateComponents"];
+        [remCI setValue:@([req[@"allDay"] boolValue]) forKey:@"allDay"];
+    }
 
     NSString *notes = req[@"notes"];
     if (notes.length > 0) { [remCI setValue:notes forKey:@"notesAsString"]; }
@@ -403,7 +425,8 @@ static NSDictionary *opAdd(id store, NSDictionary *req) {
         for (NSDictionary *al in alarms) {
             NSString *atype = al[@"type"];
             if ([atype isEqualToString:@"date"]) {
-                NSDateComponents *dc = epochToComponents(al[@"date"]);
+                // Alarms are absolute instants — never all-day.
+                NSDateComponents *dc = epochToComponents(al[@"date"], NO);
                 if (dc) {
                     id trigger = ((id(*)(id, SEL, id))objc_msgSend)([NSClassFromString(@"REMAlarmDateTrigger") alloc],
                         NSSelectorFromString(@"initWithDateComponents:"), dc);
@@ -554,10 +577,19 @@ static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDict
         [remCI setValue:req[@"notes"] forKey:@"notesAsString"];
         changes[@"notes"] = req[@"notes"];
     }
-    NSDateComponents *due = epochToComponents(req[@"due"]);
-    if (due) { [remCI setValue:due forKey:@"dueDateComponents"]; changes[@"due"] = req[@"due"]; }
-    NSDateComponents *start = epochToComponents(req[@"start"]);
-    if (start) { [remCI setValue:start forKey:@"startDateComponents"]; changes[@"start"] = req[@"start"]; }
+    NSDateComponents *due = epochToComponents(req[@"due"], [req[@"allDay"] boolValue]);
+    if (due) {
+        [remCI setValue:due forKey:@"dueDateComponents"];
+        [remCI setValue:@([req[@"allDay"] boolValue]) forKey:@"allDay"];
+        changes[@"due"] = req[@"due"];
+        changes[@"allDay"] = @([req[@"allDay"] boolValue]);
+    }
+    NSDateComponents *start = epochToComponents(req[@"start"], [req[@"allDay"] boolValue]);
+    if (start) {
+        [remCI setValue:start forKey:@"startDateComponents"];
+        [remCI setValue:@([req[@"allDay"] boolValue]) forKey:@"allDay"];
+        changes[@"start"] = req[@"start"];
+    }
     NSNumber *priority = req[@"priority"];
     if (priority) { [remCI setValue:priority forKey:@"priority"]; changes[@"priority"] = priority; }
     if (req[@"flagged"] != nil) {
@@ -652,7 +684,8 @@ static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDict
         for (NSDictionary *al in alarms) {
             NSString *atype = al[@"type"];
             if ([atype isEqualToString:@"date"]) {
-                NSDateComponents *dc = epochToComponents(al[@"date"]);
+                // Alarms are absolute instants — never all-day.
+                NSDateComponents *dc = epochToComponents(al[@"date"], NO);
                 if (dc) {
                     id trigger = ((id(*)(id, SEL, id))objc_msgSend)([NSClassFromString(@"REMAlarmDateTrigger") alloc],
                         NSSelectorFromString(@"initWithDateComponents:"), dc);

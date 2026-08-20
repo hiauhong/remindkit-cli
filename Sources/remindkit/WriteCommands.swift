@@ -161,6 +161,21 @@ private func parseDateEpoch(_ value: String?) throws -> Double? {
     return date.timeIntervalSince1970
 }
 
+/// Parse a due/start date for write requests, returning the epoch plus
+/// whether it's all-day (a pure `YYYY-MM-DD` with no time part). The
+/// ReminderKit write path needs the all-day flag: all-day reminders carry
+/// only year/month/day in dueDateComponents, and ReminderKit derives the
+/// allDay flag from the absence of hour/minute.
+private func parseDueRequest(_ value: String?) throws -> (epoch: Double, allDay: Bool)? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespaces)
+    let isAllDay = !trimmed.contains(":")
+    guard let date = parseDueDate(trimmed) else {
+        throw ValidationError("无效日期：\(value)。使用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
+    }
+    return (date.timeIntervalSince1970, isAllDay)
+}
+
 private func parseDateOption(_ value: String?, allowTime: Bool = true) throws -> DateComponents? {
     guard let value else { return nil }
     guard let date = parseDueDate(value) else {
@@ -465,8 +480,8 @@ struct Add: ParsableCommand {
                 effectiveDue = f.string(from: next)
             }
         }
-        let dueEpoch = try parseDateEpoch(effectiveDue)
-        let startEpoch = try parseDateEpoch(start)
+        let dueRequest = try parseDueRequest(effectiveDue)
+        let startRequest = try parseDueRequest(start)
         let priorityInt = try parsePriority(priority)
         let recurrence = try parseRecurrenceDict(repeat: repeatRule, every: every, days: days, until: until,
                                                  onDay: onDay, lastWorkday: lastWorkday, months: months,
@@ -483,8 +498,14 @@ struct Add: ParsableCommand {
         if let list { request["listName"] = list }
         if let listId { request["listID"] = listId }
         if let notes, !notes.isEmpty { request["notes"] = notes }
-        if let dueEpoch { request["due"] = dueEpoch }
-        if let startEpoch { request["start"] = startEpoch }
+        if let dueRequest {
+            request["due"] = dueRequest.epoch
+            request["allDay"] = dueRequest.allDay
+        }
+        if let startRequest {
+            request["start"] = startRequest.epoch
+            request["allDay"] = startRequest.allDay
+        }
         if priorityInt != 0 { request["priority"] = priorityInt }
         if urgent { request["urgent"] = true }
         if flagged { request["flagged"] = true }
@@ -505,7 +526,7 @@ struct Add: ParsableCommand {
 
         let alarms = try buildAlarms(alarmAt: alarmAt, alarmBefore: alarmBefore, location: location,
                                      latitude: latitude, longitude: longitude, proximity: proximity,
-                                     dueEpoch: dueEpoch)
+                                     dueEpoch: dueRequest?.epoch)
         if !alarms.isEmpty { request["alarms"] = alarms }
 
         let (source, result) = try writeWithReminderKit(request) {
@@ -958,9 +979,15 @@ struct Update: ParsableCommand {
             effectiveNotes = current.isEmpty ? append : current + "\n" + append
             request["notes"] = effectiveNotes
         }
-        let dueRequested = try parseDateEpoch(due)
-        if let dueRequested { request["due"] = dueRequested }
-        if let start, let epoch = try parseDateEpoch(start) { request["start"] = epoch }
+        let dueRequested = try parseDueRequest(due)
+        if let dueRequested {
+            request["due"] = dueRequested.epoch
+            request["allDay"] = dueRequested.allDay
+        }
+        if let startRequest = try parseDueRequest(start) {
+            request["start"] = startRequest.epoch
+            request["allDay"] = startRequest.allDay
+        }
         if let priority {
             let p = try parsePriority(priority)
             if p != 0 { request["priority"] = p }
@@ -988,7 +1015,7 @@ struct Update: ParsableCommand {
         if noParent { request["noParent"] = true }
 
         // --alarm-before 基准：本次显式 --due 优先，否则用提醒当前 dueDate。
-        var alarmDueEpoch = dueRequested
+        var alarmDueEpoch = dueRequested?.epoch
         if alarmBefore != nil && alarmDueEpoch == nil {
             let data = fetchEnrichedData(includeSections: false)
             alarmDueEpoch = data.reminders.first { $0.id == id }?.dueDate

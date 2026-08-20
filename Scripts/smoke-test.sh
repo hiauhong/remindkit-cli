@@ -149,6 +149,16 @@ check "add-list returns id" "ok" "$(test -n "$LIST_A_ID" && echo ok || echo no)"
 REM_ID=$("$BIN" add "$REMINDER" --list-id "$LIST_A_ID" --due 2099-01-01 --priority high --tag smoke --notes "smoke test" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 check "add returns id" "ok" "$(test -n "$REM_ID" && echo ok || echo no)"
 
+# all-day semantics (regression for the allDay write-path fix): a pure
+# YYYY-MM-DD --due must produce allDay=true; with a time part it must not.
+ALLDAY_ID=$("$BIN" add "smoke allday" --list-id "$LIST_A_ID" --due 2099-02-02 | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+check "add pure-date is allDay" "True" "$("$BIN" query --list-id "$LIST_A_ID" --fields id,allDay --format json | python3 -c "
+import json,sys
+rows=json.load(sys.stdin)
+print([r['allDay'] for r in rows if r['id']=='$ALLDAY_ID'][0])")"
+check "update to all-day keeps allDay" "True" "$("$BIN" update "$REM_ID" --due 2099-03-03 | python3 -c "import json,sys; print(json.load(sys.stdin)['changes'].get('allDay'))")"
+check "update to timed date clears allDay" "False" "$("$BIN" update "$ALLDAY_ID" --due '2099-02-02 10:30' | python3 -c "import json,sys; print(json.load(sys.stdin)['changes'].get('allDay'))")"
+
 # ── Hierarchy write path (group → list-in-group → section → filed reminder) ──
 GROUP_ID=$("$BIN" add-group "测试冒烟分组$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin)['group']['id'])")
 check "add-group returns id" "ok" "$(test -n "$GROUP_ID" && echo ok || echo no)"
