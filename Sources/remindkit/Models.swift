@@ -84,10 +84,22 @@ struct SmartListEntry: Codable {
 // MARK: - Raw types from ObjC subprocess
 
 struct ReminderKitRaw: Codable {
+    let ok: Bool?
+    let error: String?
     let smartLists: [SmartListRaw]?
     let listIDsOrdering: [String]?
     let lists: [ListRaw]?
     let reminders: [ReminderRaw]?
+
+    init(ok: Bool? = nil, error: String? = nil, smartLists: [SmartListRaw]?,
+         listIDsOrdering: [String]?, lists: [ListRaw]?, reminders: [ReminderRaw]?) {
+        self.ok = ok
+        self.error = error
+        self.smartLists = smartLists
+        self.listIDsOrdering = listIDsOrdering
+        self.lists = lists
+        self.reminders = reminders
+    }
 }
 
 struct SmartListRaw: Codable {

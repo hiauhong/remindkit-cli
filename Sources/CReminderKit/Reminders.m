@@ -127,7 +127,8 @@ static NSString *encodeRecurrenceRules(NSArray *rules) {
 // EVERY reminder including subtasks — enumerateAllRemindersWithBlock: only
 // yields top-level reminders and silently drops children (verified: 1066 vs
 // 1072, the 6 missing were all subtasks).
-void fetchReminders(id store, NSSet *sectionedListUUIDs, NSMutableArray *reminderEntries) {
+BOOL fetchReminders(id store, NSSet *sectionedListUUIDs,
+                    NSMutableArray *reminderEntries, NSString **errorMessage) {
     NSMutableArray *listIDs = [NSMutableArray array];
     void (^listBlock)(id, BOOL *) = ^(id list, BOOL *sp) {
         id oid = [list valueForKey:@"objectID"];
@@ -145,7 +146,15 @@ void fetchReminders(id store, NSSet *sectionedListUUIDs, NSMutableArray *reminde
     NSArray *reminders = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
         NSSelectorFromString(@"fetchRemindersForEventKitBridgingWithListIDs:error:"),
         listIDs, &err);
-    if (![reminders isKindOfClass:[NSArray class]]) return;
+    if (![reminders isKindOfClass:[NSArray class]]) {
+        if (errorMessage) {
+            NSString *detail = [err localizedDescription];
+            *errorMessage = detail.length > 0
+                ? detail
+                : @"ReminderKit did not return a reminders array";
+        }
+        return NO;
+    }
 
     int reminderIdx = 0;
     for (id r in reminders) {
@@ -283,4 +292,5 @@ void fetchReminders(id store, NSSet *sectionedListUUIDs, NSMutableArray *reminde
 
         [reminderEntries addObject:entry];
     }
+    return YES;
 }

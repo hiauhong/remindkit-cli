@@ -34,4 +34,11 @@ final class ErrorContractTests: XCTestCase {
         XCTAssertEqual(reminderKitErrorCode(for: "save failed: something broke"), "reminderKitError")
         XCTAssertEqual(reminderKitErrorCode(for: ""), "reminderKitError")
     }
+
+    func testExplicitSubprocessCodeWinsOverLocalizedMessage() {
+        XCTAssertEqual(reminderKitErrorCode(for: [
+            "code": "noSuchSection",
+            "error": "localized wording may change",
+        ]), "noSuchSection")
+    }
 }

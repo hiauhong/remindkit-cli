@@ -21,6 +21,15 @@ report="$(mktemp)"
 TMPHOME="$(mktemp -d)"
 trap 'rm -f "$report"; rm -rf "$TMPHOME"' EXIT
 
+# Isolate every user-side path before invoking the CLI. In particular,
+# setup --accept writes list notes; a contract test must never touch the
+# user's real notes.json, deleted cache, HOME skill install, or auto-skill.
+export HOME="$TMPHOME"
+export REMINDKIT_NOTES_FILE="$TMPHOME/notes.json"
+export REMINDKIT_DELETED_CACHE="$TMPHOME/deleted.json"
+export REMINDKIT_NO_AUTO_SKILL=1
+printf '[]' > "$REMINDKIT_DELETED_CACHE"
+
 # 提取 SKILL.md 中 ```bash 代码块的行；strip 注释与续行符。
 awk '/^```bash/{b=1; next} /^```/{b=0} b' "$SKILL" | while IFS= read -r raw; do
     line="${raw%%#*}"                      # 去行内注释
@@ -87,7 +96,7 @@ cp "$R" "$TMPHOME/.local/bin/remindkit"
 cp "$SKILL" "$TMPHOME/.agents/skills/remindkit/SKILL.md"
 
 # 用例1：源==目标（skill 只在全局位、二进制旁无源）时，--force 绝不能删掉唯一副本
-( cd "$TMPHOME" && HOME="$TMPHOME" PATH="$TMPHOME/.local/bin:$PATH" remindkit install-skill --agents --force >/dev/null 2>&1 )
+( cd "$TMPHOME" && PATH="$TMPHOME/.local/bin:$PATH" remindkit install-skill --agents --force >/dev/null 2>&1 )
 if [ -f "$TMPHOME/.agents/skills/remindkit/SKILL.md" ]; then
     echo "ok: install-skill 源==目标时 --force 不删唯一副本"
 else
@@ -96,7 +105,7 @@ else
 fi
 
 # 用例2：裸命令名（argv[0]=remindkit）从无 skill 的 cwd 调用，靠 PATH 解析到真实源
-( cd /tmp && HOME="$TMPHOME" PATH="$R_BIN_DIR:$PATH" remindkit install-skill --agents --force >/dev/null 2>&1 )
+( cd /tmp && PATH="$R_BIN_DIR:$PATH" remindkit install-skill --agents --force >/dev/null 2>&1 )
 if [ -f "$TMPHOME/.agents/skills/remindkit/SKILL.md" ]; then
     echo "ok: install-skill 裸命令名经 PATH 解析源并安装成功"
 else

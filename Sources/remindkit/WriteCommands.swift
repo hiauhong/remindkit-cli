@@ -18,11 +18,16 @@ func reminderKitErrorCode(for message: String) -> String {
     return "reminderKitError"
 }
 
+func reminderKitErrorCode(for response: [String: Any]) -> String {
+    if let code = response["code"] as? String, !code.isEmpty { return code }
+    return reminderKitErrorCode(for: response["error"] as? String ?? "")
+}
+
 /// Emit the structured error contract (`{"error":{"code":…,"message":…}}` on
 /// stderr, exit 1) for a failed ReminderKit subprocess write response.
 func failReminderKitError(_ rk: [String: Any]) -> Never {
     let message = rk["error"] as? String ?? "ReminderKit write failed"
-    fail(reminderKitErrorCode(for: message), message)
+    fail(reminderKitErrorCode(for: rk), message)
 }
 
 /// Try the ReminderKit subprocess first; fall back to EventKit ONLY when the
@@ -166,14 +171,26 @@ private func parseDateEpoch(_ value: String?) throws -> Double? {
 /// ReminderKit write path needs the all-day flag: all-day reminders carry
 /// only year/month/day in dueDateComponents, and ReminderKit derives the
 /// allDay flag from the absence of hour/minute.
-private func parseDueRequest(_ value: String?) throws -> (epoch: Double, allDay: Bool)? {
+struct DateWriteRequest: Equatable {
+    let epoch: Double
+    let allDay: Bool
+}
+
+private func parseDueRequest(_ value: String?) throws -> DateWriteRequest? {
     guard let value else { return nil }
     let trimmed = value.trimmingCharacters(in: .whitespaces)
     let isAllDay = !trimmed.contains(":")
     guard let date = parseDueDate(trimmed) else {
         throw ValidationError("无效日期：\(value)。使用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
     }
-    return (date.timeIntervalSince1970, isAllDay)
+    return DateWriteRequest(epoch: date.timeIntervalSince1970, allDay: isAllDay)
+}
+
+func resolveRequestAllDay(due: DateWriteRequest?, start: DateWriteRequest?) throws -> Bool? {
+    if let due, let start, due.allDay != start.allDay {
+        throw ValidationError("--due 和 --start 必须同为全天日期，或同为带时间的日期")
+    }
+    return due?.allDay ?? start?.allDay
 }
 
 private func parseDateOption(_ value: String?, allowTime: Bool = true) throws -> DateComponents? {
@@ -198,7 +215,7 @@ private let dayMap: [String: Int] = [
 /// 但 Reminders.app 实际存储（REMCDReminder.priority）与 iCloud 同步值用的是
 /// 反过来的 9=high / 5=medium / 1=low / 0=none（pyremindkit 等实测封装均按此
 /// 修正过）。本 CLI 读写都走同一原始值，故按真实约定映射。
-private func parsePriority(_ value: String?) throws -> Int {
+func parsePriority(_ value: String?) throws -> Int {
     guard let value else { return 0 }
     switch value.lowercased() {
     case "high", "h": return 9
@@ -279,6 +296,47 @@ private func parseRecurrenceDict(repeat: String?, every: Int, days: String?, unt
         dict["until"] = date.timeIntervalSince1970
     }
     return dict
+}
+
+private func parseEventKitRecurrenceRule(repeat: String?, every: Int, days: String?,
+                                          until: String?) throws -> EKRecurrenceRule? {
+    guard let repeatValue = `repeat`?.lowercased() else { return nil }
+    let freq: EKRecurrenceFrequency
+    switch repeatValue {
+    case "daily", "day": freq = .daily
+    case "weekly", "week": freq = .weekly
+    case "monthly", "month": freq = .monthly
+    case "yearly", "year": freq = .yearly
+    default: throw ValidationError("无效重复：\(repeatValue)。使用 daily / weekly / monthly / yearly")
+    }
+    var daysOfWeek: [EKRecurrenceDayOfWeek]?
+    if let days {
+        daysOfWeek = try days.split(separator: ",").map { name in
+            let normalized = name.trimmingCharacters(in: .whitespaces).lowercased()
+            guard let day = dayMap[normalized], let weekday = EKWeekday(rawValue: day) else {
+                throw ValidationError("无效星期：\(normalized)。使用 mon,tue,wed,thu,fri,sat,sun")
+            }
+            return EKRecurrenceDayOfWeek(dayOfTheWeek: weekday, weekNumber: 0)
+        }
+    }
+    let end: EKRecurrenceEnd? = try {
+        guard let until else { return nil }
+        guard let date = parseDueDate(until) else {
+            throw ValidationError("无效结束日期：\(until)。使用 YYYY-MM-DD")
+        }
+        return EKRecurrenceEnd(end: date)
+    }()
+    return EKRecurrenceRule(
+        recurrenceWith: freq,
+        interval: max(1, every),
+        daysOfTheWeek: daysOfWeek,
+        daysOfTheMonth: nil,
+        monthsOfTheYear: nil,
+        weeksOfTheYear: nil,
+        daysOfTheYear: nil,
+        setPositions: nil,
+        end: end
+    )
 }
 
 // MARK: - add
@@ -482,6 +540,7 @@ struct Add: ParsableCommand {
         }
         let dueRequest = try parseDueRequest(effectiveDue)
         let startRequest = try parseDueRequest(start)
+        let requestAllDay = try resolveRequestAllDay(due: dueRequest, start: startRequest)
         let priorityInt = try parsePriority(priority)
         let recurrence = try parseRecurrenceDict(repeat: repeatRule, every: every, days: days, until: until,
                                                  onDay: onDay, lastWorkday: lastWorkday, months: months,
@@ -500,12 +559,11 @@ struct Add: ParsableCommand {
         if let notes, !notes.isEmpty { request["notes"] = notes }
         if let dueRequest {
             request["due"] = dueRequest.epoch
-            request["allDay"] = dueRequest.allDay
         }
         if let startRequest {
             request["start"] = startRequest.epoch
-            request["allDay"] = startRequest.allDay
         }
+        if let requestAllDay { request["allDay"] = requestAllDay }
         if priorityInt != 0 { request["priority"] = priorityInt }
         if urgent { request["urgent"] = true }
         if flagged { request["flagged"] = true }
@@ -545,7 +603,7 @@ struct Add: ParsableCommand {
                 due: try parseDateOption(effectiveDue, allowTime: hasTime),
                 start: try parseDateOption(start),
                 priority: priorityInt,
-                recurrence: try parseRecurrenceRule(repeat: repeatRule, every: every, days: days, until: until)
+                recurrence: try parseEventKitRecurrenceRule(repeat: repeatRule, every: every, days: days, until: until)
             )
             var degraded = false
             if urgent || flagged || !tag.isEmpty || parent != nil || section != nil
@@ -562,41 +620,6 @@ struct Add: ParsableCommand {
         try jsonOut(out)
     }
 
-    private func parseRecurrenceRule(repeat: String?, every: Int, days: String?, until: String?) throws -> EKRecurrenceRule? {
-        guard let repeatValue = `repeat`?.lowercased() else { return nil }
-        let freq: EKRecurrenceFrequency
-        switch repeatValue {
-        case "daily", "day": freq = .daily
-        case "weekly", "week": freq = .weekly
-        case "monthly", "month": freq = .monthly
-        case "yearly", "year": freq = .yearly
-        default: throw ValidationError("无效重复：\(repeatValue)。使用 daily / weekly / monthly / yearly")
-        }
-        var daysOfWeek: [EKRecurrenceDayOfWeek]? = nil
-        if let days {
-            daysOfWeek = try days.split(separator: ",").map { name in
-                let n = name.trimmingCharacters(in: .whitespaces).lowercased()
-                guard let d = dayMap[n], let weekday = EKWeekday(rawValue: d) else {
-                    throw ValidationError("无效星期：\(name).trimmingCharacters(in: .whitespaces)。使用 mon,tue,wed,thu,fri,sat,sun")
-                }
-                return EKRecurrenceDayOfWeek(dayOfTheWeek: weekday, weekNumber: 0)
-            }
-        }
-        let end: EKRecurrenceEnd? = try {
-            guard let until else { return nil }
-            guard let date = parseDueDate(until) else {
-                throw ValidationError("无效结束日期：\(until)。使用 YYYY-MM-DD")
-            }
-            return EKRecurrenceEnd(end: date)
-        }()
-        return EKRecurrenceRule(
-            recurrenceWith: freq,
-            interval: max(1, every),
-            daysOfTheWeek: daysOfWeek,
-            daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil,
-            daysOfTheYear: nil, setPositions: nil, end: end
-        )
-    }
 }
 
 // MARK: - complete / reopen
@@ -700,7 +723,7 @@ private func saveDeletedCache(_ records: [DeletedRecord]) {
     }
 }
 
-private func appendDeletedRecord(_ record: DeletedRecord) {
+func appendDeletedRecord(_ record: DeletedRecord) {
     var records = loadDeletedCache()
     records.removeAll { $0.id == record.id }
     records.append(record)
@@ -882,7 +905,7 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "New start date")
     var start: String?
 
-    @Option(name: .long, help: "New priority: high|medium|low")
+    @Option(name: .long, help: "New priority: high|medium|low|none (or 0-9)")
     var priority: String?
 
     @Option(name: .long, help: "Set tags (repeatable)")
@@ -891,8 +914,11 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "New URL")
     var url: String?
 
-    @Option(name: .customLong("repeat"), help: "Repeat rule: daily|weekly|monthly|yearly")
+    @Option(name: .customLong("repeat"), help: "Replace repeat rule: daily|weekly|monthly|yearly")
     var repeatRule: String?
+
+    @Flag(name: .customLong("no-repeat"), help: "Clear all repeat rules")
+    var noRepeat: Bool = false
 
     @Option(name: .long, help: "Repeat every N units")
     var every: Int?
@@ -958,10 +984,13 @@ struct Update: ParsableCommand {
         if parent != nil && noParent {
             throw ValidationError("--parent and --no-parent are mutually exclusive")
         }
+        if repeatRule != nil && noRepeat {
+            throw ValidationError("--repeat and --no-repeat are mutually exclusive")
+        }
         if title == nil && notes == nil && notesAppend == nil && due == nil && start == nil && priority == nil
             && tag.isEmpty && url == nil && repeatRule == nil && until == nil
             && alarmAt.isEmpty && alarmBefore == nil && location == nil
-            && !flag && !noFlag && !urgent && !noUrgent && section == nil && parent == nil && !noParent {
+            && !flag && !noFlag && !urgent && !noUrgent && section == nil && parent == nil && !noParent && !noRepeat {
             throw ValidationError("specify at least one field or flag to update")
         }
     }
@@ -979,18 +1008,19 @@ struct Update: ParsableCommand {
             effectiveNotes = current.isEmpty ? append : current + "\n" + append
             request["notes"] = effectiveNotes
         }
-        let dueRequested = try parseDueRequest(due)
-        if let dueRequested {
-            request["due"] = dueRequested.epoch
-            request["allDay"] = dueRequested.allDay
+        let dueRequest = try parseDueRequest(due)
+        let startRequest = try parseDueRequest(start)
+        let requestAllDay = try resolveRequestAllDay(due: dueRequest, start: startRequest)
+        if let dueRequest {
+            request["due"] = dueRequest.epoch
         }
-        if let startRequest = try parseDueRequest(start) {
+        if let startRequest {
             request["start"] = startRequest.epoch
-            request["allDay"] = startRequest.allDay
         }
+        if let requestAllDay { request["allDay"] = requestAllDay }
         if let priority {
             let p = try parsePriority(priority)
-            if p != 0 { request["priority"] = p }
+            request["priority"] = p
         }
         if !tag.isEmpty { request["tags"] = tag }
         if let url, !url.isEmpty { request["url"] = url }
@@ -999,6 +1029,7 @@ struct Update: ParsableCommand {
                                                     lastWorkday: false, months: nil, onWeekday: nil) {
             request["recurrence"] = recurrence
         }
+        if noRepeat { request["clearRecurrence"] = true }
         if flag { request["flagged"] = true }
         if noFlag { request["flagged"] = false }
         if urgent { request["urgent"] = true }
@@ -1015,7 +1046,7 @@ struct Update: ParsableCommand {
         if noParent { request["noParent"] = true }
 
         // --alarm-before 基准：本次显式 --due 优先，否则用提醒当前 dueDate。
-        var alarmDueEpoch = dueRequested?.epoch
+        var alarmDueEpoch = dueRequest?.epoch
         if alarmBefore != nil && alarmDueEpoch == nil {
             let data = fetchEnrichedData(includeSections: false)
             alarmDueEpoch = data.reminders.first { $0.id == id }?.dueDate
@@ -1025,8 +1056,20 @@ struct Update: ParsableCommand {
                                      dueEpoch: alarmDueEpoch)
         if !alarms.isEmpty { request["alarms"] = alarms }
 
+        let eventKitRecurrenceRules: [EKRecurrenceRule]?
+        if noRepeat {
+            eventKitRecurrenceRules = []
+        } else if let rule = try parseEventKitRecurrenceRule(
+            repeat: repeatRule, every: every ?? 1, days: days, until: until
+        ) {
+            eventKitRecurrenceRules = [rule]
+        } else {
+            eventKitRecurrenceRules = nil
+        }
+
         let (source, result) = try writeWithReminderKit(request) {
-            // EventKit fallback: core fields only (tags/repeat/flag/urgent degrade).
+            // EventKit fallback: recurrence is replaceable through the public
+            // API; tags/flag/urgent and ReminderKit-only hierarchy fields degrade.
             let store = RemindersAuth.requestAccessSync()
             let writer = RemindersWriter(store: store)
             guard let reminder = writer.reminder(id: id) else {
@@ -1038,10 +1081,11 @@ struct Update: ParsableCommand {
                 notes: effectiveNotes,
                 due: try parseDateOption(due),
                 start: try parseDateOption(start),
-                priority: priority.flatMap { try? parsePriority($0) }
+                priority: priority.flatMap { try? parsePriority($0) },
+                recurrenceRules: eventKitRecurrenceRules
             )
             var dict = reminderJSON(reminder)
-            if !tag.isEmpty || repeatRule != nil || flag || noFlag || urgent || noUrgent || section != nil
+            if !tag.isEmpty || flag || noFlag || urgent || noUrgent || section != nil
                 || parent != nil || noParent || url != nil || !alarmAt.isEmpty || alarmBefore != nil || location != nil {
                 dict["degraded"] = true
             }

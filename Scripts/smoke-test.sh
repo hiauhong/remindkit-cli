@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
 # remindkit smoke test — run against the built binary.
 #
-# Test discipline (hard rule): the script
-# ONLY ever touches lists/groups/smart lists whose name starts with
-# 「测试冒烟」(test smoke), which it creates itself and removes at the end.
-# It NEVER writes to real lists — real user data must be identical before
-# and after a run (verified by the final LEFT check). A failure anywhere
-# exits non-zero.
+# Test discipline (hard rule): the script records the exact IDs of every
+# list/group/smart list it creates and cleanup only ever deletes those IDs.
+# It NEVER writes to or deletes real lists. A failure anywhere exits non-zero.
 #
-# Usage:  make test   (or)   bash Scripts/smoke-test.sh
+# Usage:
+#   make test                                  # full smoke + contract suite
+#   make test-regressions                      # focused checks for recent fixes
+#   bash Scripts/smoke-test.sh --regressions   # focused checks directly
 
 set -euo pipefail
 
 BIN="${REMINDKIT_BIN:-$(cd "$(dirname "$0")/.." && pwd)/.build/release/remindkit}"
+SUITE="${1:-full}"
+
+case "$SUITE" in
+    full|--regressions) ;;
+    *)
+        echo "error: unknown smoke suite '$SUITE' (use --regressions or omit it for full)" >&2
+        exit 2
+        ;;
+esac
 
 if [[ ! -x "$BIN" ]]; then
     echo "error: binary not found at $BIN (run 'make build' first)" >&2
@@ -28,43 +37,70 @@ REMINDER="冒烟提醒$TAG"
 # Isolated deleted-cache file for this run — the test's delete/restore
 # round-trip must never touch the user's real recently-deleted cache.
 CACHE="$(mktemp -t remindkit-deleted.XXXXXX 2>/dev/null || echo "/tmp/remindkit-deleted.$$")"
+BASELINE_FILE="$(mktemp -t remindkit-baseline.XXXXXX 2>/dev/null || echo "/tmp/remindkit-baseline.$$")"
+AFTER_FILE="$(mktemp -t remindkit-after.XXXXXX 2>/dev/null || echo "/tmp/remindkit-after.$$")"
 export REMINDKIT_DELETED_CACHE="$CACHE"
+printf '[]' > "$CACHE"
 KEEP_CACHE=0
+CREATED_ENTITY_IDS=()
+CLEANUP_DONE=0
+
+register_entity_id() {
+    local id="$1"
+    if [[ -n "$id" ]]; then
+        CREATED_ENTITY_IDS+=("$id")
+    fi
+}
+
+current_entity_ids() {
+    "$BIN" dump 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for c in d.get('calendars', []): print(c['id'])
+for s in d.get('smartLists', []): print(s.get('uuid', ''))
+"
+}
+
+entity_exists_in() {
+    local ids="$1" id="$2"
+    grep -Fqx -- "$id" <<<"$ids"
+}
 
 cleanup() {
-    # Best-effort removal of everything the test created, with retries
+    if [[ "$CLEANUP_DONE" == "1" ]]; then return; fi
+    # Best-effort removal of exactly the entities created by this run, with retries
     # (remindd sync can briefly delay a delete from being visible, and a
     # freshly-restored reminder can race a list delete).
     for attempt in 1 2 3 4 5; do
-        local ids
-        ids=$("$BIN" list --format json 2>/dev/null | python3 -c "
-import json,sys
-for c in json.load(sys.stdin):
-    if c['title'].startswith('测试冒烟'):
-        print(c['id'])")
-        if [[ -z "$ids" ]]; then break; fi
-        for id in $ids; do
-            if ! "$BIN" delete-list --id "$id" --yes >/dev/null 2>&1; then
-                echo "  cleanup: delete-list $id failed (attempt $attempt)" >&2
+        local remaining=0
+        local id existing_ids
+        if ! existing_ids=$(current_entity_ids); then
+            echo "  cleanup: entity snapshot failed (attempt $attempt)" >&2
+            sleep 2
+            continue
+        fi
+        for id in "${CREATED_ENTITY_IDS[@]}"; do
+            if entity_exists_in "$existing_ids" "$id"; then
+                remaining=$((remaining + 1))
+                if ! "$BIN" delete-list --id "$id" --yes >/dev/null 2>&1; then
+                    echo "  cleanup: delete-list $id failed (attempt $attempt)" >&2
+                fi
             fi
         done
+        if [[ "$remaining" -eq 0 ]]; then break; fi
         sleep 2
-    done
-    # Smart lists live outside list output; remove them separately.
-    local sls
-    sls=$("$BIN" dump 2>/dev/null | python3 -c "
-import json,sys
-for s in json.load(sys.stdin).get('smartLists', []):
-    if s.get('name', '').startswith('测试冒烟'):
-        print(s['uuid'])")
-    for id in $sls; do
-        "$BIN" delete-list --id "$id" --yes >/dev/null 2>&1 || true
     done
     if [[ "$KEEP_CACHE" != "1" ]]; then
         rm -f "$CACHE" 2>/dev/null || true
     fi
+    CLEANUP_DONE=1
 }
-trap cleanup EXIT
+
+finish() {
+    cleanup
+    rm -f "$BASELINE_FILE" "$AFTER_FILE" 2>/dev/null || true
+}
+trap finish EXIT
 
 check() { # check <description> <expected> <actual>
     local desc="$1" expected="$2" actual="$3"
@@ -76,6 +112,229 @@ check() { # check <description> <expected> <actual>
         echo "FAIL: $desc — expected [$expected], got [$actual]" >&2
     fi
 }
+
+ids_are_distinct() {
+    python3 -c 'import sys
+ids=sys.argv[1:]
+print("ok" if len(ids)==len(set(ids)) and all(ids) else "bad")' "$@"
+}
+
+created_ids_match_dump() {
+    "$BIN" dump | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+name=sys.argv[1]
+returned=sys.argv[2:]
+actual=[c["id"] for c in d.get("calendars",[]) if c.get("title")==name]
+actual += [s["uuid"] for s in d.get("smartLists",[]) if s.get("name")==name]
+print("ok" if set(returned)==set(actual) and len(actual)==len(returned) else "bad")' "$@"
+}
+
+snapshot_real_data() {
+    local output_file="$1"
+    shift
+    "$BIN" dump | python3 -c 'import json,sys
+excluded=set(sys.argv[2:])
+d=json.load(sys.stdin)
+d.pop("exportedAt", None)
+
+d["calendars"]=sorted(
+    (x for x in d.get("calendars", []) if x.get("id") not in excluded),
+    key=lambda x:x.get("id", ""))
+d["smartLists"]=sorted(
+    (x for x in d.get("smartLists", []) if x.get("uuid") not in excluded),
+    key=lambda x:x.get("uuid", ""))
+d["reminders"]=sorted(
+    (x for x in d.get("reminders", []) if x.get("calendarId") not in excluded),
+    key=lambda x:x.get("id", ""))
+d["listIDsOrdering"]=[x for x in d.get("listIDsOrdering", []) if x not in excluded]
+
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(d, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))' \
+        "$output_file" "$@"
+}
+
+real_data_unchanged() {
+    snapshot_real_data "$AFTER_FILE" "${CREATED_ENTITY_IDS[@]}"
+    if cmp -s "$BASELINE_FILE" "$AFTER_FILE"; then
+        echo ok
+        return
+    fi
+    python3 -c 'import json,sys
+before=json.load(open(sys.argv[1], encoding="utf-8"))
+after=json.load(open(sys.argv[2], encoding="utf-8"))
+changed=[k for k in sorted(set(before)|set(after)) if before.get(k)!=after.get(k)]
+print("  baseline mismatch in: " + ", ".join(changed), file=sys.stderr)' \
+        "$BASELINE_FILE" "$AFTER_FILE"
+    echo changed
+}
+
+# Capture before the first test command performs any write. The after snapshot
+# filters only IDs recorded by this run; every other object must be identical.
+snapshot_real_data "$BASELINE_FILE"
+
+recurrence_rule_count() {
+    local list_id="$1" reminder_id="$2"
+    "$BIN" query --list-id "$list_id" --all --fields id,recurrenceRules --format json | \
+        python3 -c 'import json,sys
+rows=json.load(sys.stdin)
+target=sys.argv[1]
+row=next(r for r in rows if r["id"]==target)
+rules=row.get("recurrenceRules", "[]")
+if isinstance(rules, str): rules=json.loads(rules)
+print(len(rules))' "$reminder_id"
+}
+
+recurrence_due_date() {
+    local list_id="$1" reminder_id="$2"
+    "$BIN" query --list-id "$list_id" --all --fields id,dueDateText --format json | \
+        python3 -c 'import json,sys
+rows=json.load(sys.stdin)
+target=sys.argv[1]
+row=next(r for r in rows if r["id"]==target)
+print(row.get("dueDateText", "").split()[0])' "$reminder_id"
+}
+
+reminder_field() {
+    local list_id="$1" reminder_id="$2" field="$3"
+    "$BIN" query --list-id "$list_id" --all --fields "id,$field" --format json | \
+        python3 -c 'import json,sys
+rows=json.load(sys.stdin)
+target,field=sys.argv[1:]
+row=next(r for r in rows if r["id"]==target)
+print(row.get(field, ""))' "$reminder_id" "$field"
+}
+
+run_command_contract_suite() {
+    local list_name="测试冒烟命令契约$TAG"
+    local list_id
+    local priority_id url_id bulk_delete_id bulk_tag
+    local preview section_error query_error tree_error bulk_result
+
+    list_id=$("$BIN" add-list "$list_name" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+    register_entity_id "$list_id"
+    priority_id=$("$BIN" add "priority none regression" --list-id "$list_id" --priority high | \
+        python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+
+    preview=$("$BIN" bulk --op delete --list "$list_id" --all --dry-run)
+    check "bulk destructive dry-run does not require --yes" "ok" "$(echo "$preview" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("ok" if d.get("dryRun") is True and d.get("selected", 0) > 0 else "bad")')"
+
+    "$BIN" update "$priority_id" --priority none >/dev/null
+    check "update --priority none clears priority" "0" \
+        "$(reminder_field "$list_id" "$priority_id" priority)"
+
+    url_id=$("$BIN" add "url replacement regression" --list-id "$list_id" \
+        --url "https://example.com/old" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+    "$BIN" update "$url_id" --url "https://example.com/new" >/dev/null
+    check "update --url replaces the old URL" "https://example.com/new" \
+        "$(reminder_field "$list_id" "$url_id" url)"
+
+    section_error=$("$BIN" update "$priority_id" --section "missing-$TAG" 2>&1 || true)
+    check "missing section returns explicit noSuchSection" "noSuchSection" "$(echo "$section_error" | python3 -c '
+import json,sys
+print(json.load(sys.stdin).get("error", {}).get("code", ""))')"
+
+    query_error=$("$BIN" query --list-id "$list_id" --section "missing-$TAG" --no-sections 2>&1 || true)
+    check "query rejects --section with --no-sections" "ok" \
+        "$(echo "$query_error" | grep -q 'mutually exclusive' && echo ok || echo bad)"
+
+    tree_error=$("$BIN" query --smart-list "missing-$TAG" --tree 2>&1 || true)
+    check "query rejects smart-list tree explicitly" "ok" \
+        "$(echo "$tree_error" | grep -q 'does not support --smart-list' && echo ok || echo bad)"
+
+    bulk_tag="bulk-delete-$TAG"
+    bulk_delete_id=$("$BIN" add "bulk delete restore regression" --list-id "$list_id" --tag "$bulk_tag" | \
+        python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+    bulk_result=$("$BIN" bulk --op delete --list "$list_id" --tag "$bulk_tag" --all --yes)
+    check "bulk delete succeeds once" "1" "$(echo "$bulk_result" | python3 -c '
+import json,sys
+print(json.load(sys.stdin).get("succeeded", 0))')"
+    check "bulk delete is recorded for restore" "ok" "$("$BIN" recently-deleted | python3 -c '
+import json,sys
+target=sys.argv[1]
+print("ok" if any(i.get("id")==target for i in json.load(sys.stdin).get("items", [])) else "missing")' "$bulk_delete_id")"
+    "$BIN" restore "$bulk_delete_id" --list-id "$list_id" >/dev/null
+    check "bulk-deleted reminder restores through CLI" "$bulk_delete_id" \
+        "$(reminder_field "$list_id" "$bulk_delete_id" id)"
+}
+
+run_regression_suite() {
+    local target_list="测试冒烟回归日期$TAG"
+    local collision_name="测试冒烟回归同名$TAG"
+    local target_list_id recurrence_id collision_list_id smart_a_id smart_b_id
+    local mixed_error collision_error left=0 id existing_ids
+
+    echo "== remindkit focused regression smoke (binary: $BIN) =="
+
+    OUT=$("$BIN" doctor --json)
+    check "read outcome is explicit success" "ok" "$(echo "$OUT" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('ok' if d.get('subprocess','').startswith('ok') else 'bad')")"
+
+    target_list_id=$("$BIN" add-list "$target_list" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+    register_entity_id "$target_list_id"
+    mixed_error=$("$BIN" add "mixed date regression" --list-id "$target_list_id" \
+        --due 2099-04-04 --start '2099-04-04 09:00' 2>&1 || true)
+    check "mixed due/start granularity rejected" "ok" \
+        "$(echo "$mixed_error" | grep -q '必须同为全天日期' && echo ok || echo bad)"
+    check "mixed date rejection writes nothing" "0" \
+        "$("$BIN" query --list-id "$target_list_id" --all --format count | python3 -c \
+            'import json,sys; print(json.load(sys.stdin)["total"])')"
+
+    recurrence_id=$("$BIN" add "repeat replacement regression" --list-id "$target_list_id" \
+        --due 2099-09-20 --repeat monthly | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+    "$BIN" update "$recurrence_id" --due 2099-09-19 --repeat monthly >/dev/null
+    check "update --repeat moves recurrence anchor from 20th to 19th" "2099-09-19" \
+        "$(recurrence_due_date "$target_list_id" "$recurrence_id")"
+    check "update --repeat replaces existing rules" "1" \
+        "$(recurrence_rule_count "$target_list_id" "$recurrence_id")"
+    "$BIN" update "$recurrence_id" --no-repeat >/dev/null
+    check "update --no-repeat clears rules" "0" \
+        "$(recurrence_rule_count "$target_list_id" "$recurrence_id")"
+
+    run_command_contract_suite
+
+    collision_list_id=$("$BIN" add-list "$collision_name" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+    register_entity_id "$collision_list_id"
+    smart_a_id=$("$BIN" add-smartlist "$collision_name" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+    register_entity_id "$smart_a_id"
+    smart_b_id=$("$BIN" add-smartlist "$collision_name" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+    register_entity_id "$smart_b_id"
+
+    check "duplicate smart-list ids are distinct" "ok" \
+        "$(ids_are_distinct "$collision_list_id" "$smart_a_id" "$smart_b_id")"
+    check "created ids match dump exactly" "ok" \
+        "$(created_ids_match_dump "$collision_name" "$collision_list_id" "$smart_a_id" "$smart_b_id")"
+
+    collision_error=$("$BIN" delete-list "$collision_name" --yes 2>&1 || true)
+    check "delete-list rejects cross-family ambiguity" "ok" "$(echo "$collision_error" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('ok' if '跨列表/智能列表/分组' in d.get('error',{}).get('message','') else 'bad')")"
+
+    cleanup
+    if existing_ids=$(current_entity_ids); then
+        for id in "${CREATED_ENTITY_IDS[@]}"; do
+            if entity_exists_in "$existing_ids" "$id"; then left=$((left + 1)); fi
+        done
+    else
+        left="snapshot-failed"
+    fi
+    check "focused smoke leaves no created entities" "0" "$left"
+    check "focused smoke preserves all pre-existing data" "ok" "$(real_data_unchanged)"
+
+    echo ""
+    echo "passed: $PASS  failed: $FAIL"
+    [[ "$FAIL" -eq 0 ]]
+}
+
+if [[ "$SUITE" == "--regressions" ]]; then
+    run_regression_suite
+    exit $?
+fi
 
 echo "== remindkit smoke test (binary: $BIN) =="
 
@@ -144,6 +403,7 @@ done
 echo "-- write path (smoke lists only) --"
 
 LIST_A_ID=$("$BIN" add-list "$LIST_A" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$LIST_A_ID"
 check "add-list returns id" "ok" "$(test -n "$LIST_A_ID" && echo ok || echo no)"
 
 REM_ID=$("$BIN" add "$REMINDER" --list-id "$LIST_A_ID" --due 2099-01-01 --priority high --tag smoke --notes "smoke test" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
@@ -158,9 +418,21 @@ rows=json.load(sys.stdin)
 print([r['allDay'] for r in rows if r['id']=='$ALLDAY_ID'][0])")"
 check "update to all-day keeps allDay" "True" "$("$BIN" update "$REM_ID" --due 2099-03-03 | python3 -c "import json,sys; print(json.load(sys.stdin)['changes'].get('allDay'))")"
 check "update to timed date clears allDay" "False" "$("$BIN" update "$ALLDAY_ID" --due '2099-02-02 10:30' | python3 -c "import json,sys; print(json.load(sys.stdin)['changes'].get('allDay'))")"
+MIXED_DATE_ERR=$("$BIN" add "smoke mixed date" --list-id "$LIST_A_ID" --due 2099-04-04 --start '2099-04-04 09:00' 2>&1 || true)
+check "mixed due/start granularity rejected" "ok" "$(echo "$MIXED_DATE_ERR" | grep -q '必须同为全天日期' && echo ok || echo bad)"
+
+REPEAT_ID=$("$BIN" add "smoke repeat replacement" --list-id "$LIST_A_ID" --due 2099-09-20 --repeat monthly | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+"$BIN" update "$REPEAT_ID" --due 2099-09-19 --repeat monthly >/dev/null
+check "update --repeat moves recurrence anchor from 20th to 19th" "2099-09-19" "$(recurrence_due_date "$LIST_A_ID" "$REPEAT_ID")"
+check "update --repeat replaces existing rules" "1" "$(recurrence_rule_count "$LIST_A_ID" "$REPEAT_ID")"
+"$BIN" update "$REPEAT_ID" --no-repeat >/dev/null
+check "update --no-repeat clears rules" "0" "$(recurrence_rule_count "$LIST_A_ID" "$REPEAT_ID")"
+
+run_command_contract_suite
 
 # ── Hierarchy write path (group → list-in-group → section → filed reminder) ──
 GROUP_ID=$("$BIN" add-group "测试冒烟分组$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin)['group']['id'])")
+register_entity_id "$GROUP_ID"
 check "add-group returns id" "ok" "$(test -n "$GROUP_ID" && echo ok || echo no)"
 
 # update-list unified dispatch (feature pool #15): group rename by name + verify
@@ -175,6 +447,7 @@ print('ok' if gs else 'missing')")"
 check "update-list group rename by id" "group" "$("$BIN" update-list "$GROUP_ID" --new-name "测试冒烟分组$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('type',''))")"
 
 LIST_IN_GROUP_ID=$("$BIN" add-list "测试冒烟组内$TAG" --group-id "$GROUP_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$LIST_IN_GROUP_ID"
 check "add-list --group returns id" "ok" "$(test -n "$LIST_IN_GROUP_ID" && echo ok || echo no)"
 
 check "add-section ok" "ok" "$("$BIN" add-section "测试冒烟组内$TAG" "测试冒烟分区$TAG" | python3 -c "import json,sys; print('ok' if json.load(sys.stdin).get('ok') else 'bad')")"
@@ -186,7 +459,27 @@ check "add --section returns id" "ok" "$(test -n "$REM_IN_SECTION" && echo ok ||
 check "update --section moves" "测试冒烟分区2$TAG" "$("$BIN" update "$REM_IN_SECTION" --section "测试冒烟分区2$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('changes', {}).get('section', ''))")"
 
 SL_ID=$("$BIN" add-smartlist "测试冒烟智能$TAG" --color "#FF3B30" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$SL_ID"
 check "add-smartlist returns id" "ok" "$(test -n "$SL_ID" && echo ok || echo no)"
+
+# Duplicate names are legal. Creation must return each newly-created UUID,
+# and delete-list by name must refuse a cross-family ambiguous match.
+COLLISION_NAME="测试冒烟同名$TAG"
+COLLISION_LIST_ID=$("$BIN" add-list "$COLLISION_NAME" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$COLLISION_LIST_ID"
+COLLISION_SMART_A_ID=$("$BIN" add-smartlist "$COLLISION_NAME" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$COLLISION_SMART_A_ID"
+COLLISION_SMART_B_ID=$("$BIN" add-smartlist "$COLLISION_NAME" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$COLLISION_SMART_B_ID"
+check "duplicate smart-list creation returns distinct ids" "ok" \
+    "$(ids_are_distinct "$COLLISION_LIST_ID" "$COLLISION_SMART_A_ID" "$COLLISION_SMART_B_ID")"
+check "created ids match dump exactly" "ok" \
+    "$(created_ids_match_dump "$COLLISION_NAME" "$COLLISION_LIST_ID" "$COLLISION_SMART_A_ID" "$COLLISION_SMART_B_ID")"
+COLLISION_ERR=$("$BIN" delete-list "$COLLISION_NAME" --yes 2>&1 || true)
+check "delete-list rejects cross-family ambiguity" "ok" "$(echo "$COLLISION_ERR" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('ok' if '跨列表/智能列表/分组' in d.get('error', {}).get('message', '') else 'bad')")"
 
 # update-list unified dispatch: smart list rename by name + verify via dump
 SL_RENAMED="测试冒烟智能改名$TAG"
@@ -272,33 +565,38 @@ print('ok' if not any(i['id']=='$MOVED' for i in items) else 'still-present')")"
 sleep 2
 
 # ── reorder: 列表内相对移动（--before/--after/--first/--last）──────────
-# 锚点：新建一个同级提醒，让列表至少两个任务可排序。
-SIB=$("$BIN" add "冒烟排序锚点$TAG" --list-id "$LIST_A_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+# 独立的两任务列表：避免前面回归新增的提醒破坏 --last 与单任务前提。
+REORDER_LIST="测试冒烟排序$TAG"
+REORDER_LIST_ID=$("$BIN" add-list "$REORDER_LIST" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$REORDER_LIST_ID"
+REORDER_TITLE="冒烟排序目标$TAG"
+REORDER_ID=$("$BIN" add "$REORDER_TITLE" --list-id "$REORDER_LIST_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+SIB=$("$BIN" add "冒烟排序锚点$TAG" --list-id "$REORDER_LIST_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 check "reorder anchor add ok" "ok" "$(test -n "$SIB" && echo ok || echo no)"
 
-check "reorder --first ok" "ok" "$("$BIN" reorder "$REM_ID" --first | python3 -c "
+check "reorder --first ok" "ok" "$("$BIN" reorder "$REORDER_ID" --first | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print('ok' if d.get('ok') and d.get('relation')=='before' else 'bad')")"
-check "reorder --before sibling ok" "ok" "$("$BIN" reorder "$REM_ID" --before "$SIB" | python3 -c "
+check "reorder --before sibling ok" "ok" "$("$BIN" reorder "$REORDER_ID" --before "$SIB" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print('ok' if d.get('ok') and d.get('relation')=='before' and d.get('sibling')=='冒烟排序锚点$TAG' else 'bad')")"
-check "reorder --after sibling ok" "ok" "$("$BIN" reorder "$REM_ID" --after "$SIB" | python3 -c "
+check "reorder --after sibling ok" "ok" "$("$BIN" reorder "$REORDER_ID" --after "$SIB" | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print('ok' if d.get('ok') and d.get('relation')=='after' else 'bad')")"
-check "reorder --last ok" "ok" "$("$BIN" reorder "$REM_ID" --last | python3 -c "
+check "reorder --last ok" "ok" "$("$BIN" reorder "$REORDER_ID" --last | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print('ok' if d.get('ok') and d.get('relation')=='after' else 'bad')")"
 
-# 顺序验证：--last 后 REMINDER 应排列表末尾（query 枚举顺序 = 显示顺序）
-OUT=$("$BIN" query --list-id "$LIST_A_ID" --fields title --format json)
+# 顺序验证：--last 后目标应排列表末尾（query 枚举顺序 = 显示顺序）
+OUT=$("$BIN" query --list-id "$REORDER_LIST_ID" --fields title --format json)
 check "reorder --last moves reminder to bottom" "ok" "$(echo "$OUT" | python3 -c "
 import json,sys
 rows=[r['title'] for r in json.load(sys.stdin)]
-print('ok' if rows and rows[-1]=='$REMINDER' else 'bad: ' + ','.join(rows[-3:]))")"
+print('ok' if rows and rows[-1]=='$REORDER_TITLE' else 'bad: ' + ','.join(rows[-3:]))")"
 
 # 单任务 no-op：把锚点删掉，剩唯一任务，--first 应 unchanged
 "$BIN" delete "$SIB" >/dev/null 2>&1
-check "reorder single-task no-op (unchanged)" "ok" "$("$BIN" reorder "$REM_ID" --first | python3 -c "
+check "reorder single-task no-op (unchanged)" "ok" "$("$BIN" reorder "$REORDER_ID" --first | python3 -c "
 import json,sys; d=json.load(sys.stdin)
 print('ok' if d.get('ok') and d.get('unchanged') else 'bad')")"
 
@@ -347,6 +645,7 @@ check "successful run leaves stderr clean" "" "$STDERR"
 SEC_LIST="测试冒烟C$TAG"
 SEC_NAME="测试冒烟分区$TAG"
 SEC_LIST_ID=$("$BIN" add-list "$SEC_LIST" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$SEC_LIST_ID"
 check "move-section: target list created" "ok" "$(test -n "$SEC_LIST_ID" && echo ok || echo no)"
 "$BIN" add-section "$SEC_LIST" "$SEC_NAME" >/dev/null 2>&1
 MVREM=$("$BIN" add "冒烟迁移$TAG" --list-id "$LIST_A_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
@@ -389,14 +688,16 @@ cleanup
 LEFT=$("$BIN" dump 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-left=[c['title'] for c in d['calendars'] if c['title'].startswith('测试冒烟')]
-left += [s['name'] for s in d.get('smartLists', []) if s.get('name', '').startswith('测试冒烟')]
-print(len(left))
-")
+targets=set(sys.argv[1:])
+ids={c['id'] for c in d.get('calendars', [])}
+ids.update(s.get('uuid') for s in d.get('smartLists', []))
+print(len(targets & ids))
+" "${CREATED_ENTITY_IDS[@]}")
 if [[ "$LEFT" != "0" ]]; then
-    echo "FAIL: $LEFT test list(s) left behind after cleanup" >&2
+    echo "FAIL: $LEFT entity ID(s) from this run left behind after cleanup" >&2
     FAIL=$((FAIL + LEFT))
 fi
+check "full smoke preserves all pre-existing data" "ok" "$(real_data_unchanged)"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""

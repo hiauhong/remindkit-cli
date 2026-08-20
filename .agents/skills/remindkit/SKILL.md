@@ -73,7 +73,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - **分区 = 分类框架**：分区名（如视频/小红书/图文/运营）本身就是"什么条目属于此列表"的定义——判断某条目是否属于该列表，先看它落在哪个分区，再用分区语义定标准。
 - **列表备注 note = 领域模型**：`list --format json` 的 note 字段说明列表用途；分析前先读（`note --all` 也可）。
 - **杂项/兜底分区是重灾区**：无归属的分区（如「运营」「其他」）最容易混入不属于该列表的条目——分析时优先检查它们。
-- **智能列表（今天/旗标/已完成/已分配 + 自定义）是虚拟视图**：事项引用自普通列表；自定义智能列表**支持分区**（#16，`add-section --smart-list` 建、`query --smart-list` 求值），子任务在智能列表视图平铺显示（无父子缩进）。
+- **智能列表（今天/旗标/已完成/已分配 + 自定义）是虚拟视图**：事项引用自普通列表；自定义智能列表**支持分区**（#16，`add-section --smart-list` 建、`query --smart-list` 求值），子任务在智能列表视图平铺显示（无父子缩进）。当前读 schema 无智能列表分区 membership，因此 `query --smart-list ... --tree` 明确报 unsupported，不伪造树。
 
 **分析结构化清单的流程（硬纪律）**：
 1. **先输出结构地图**：`list --format json`（全部列表+备注+分组）→ `query --list X --tree`（目标列表内部分区→任务→子任务树）
@@ -85,7 +85,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 
 - 所有查询命令**默认只返回未完成**；`--completed` 只查已完成；`--all` 查全部（`--completed` 与 `--all` 互斥）。
 - **JSON 日期字段**：`dueDate` 是 epoch（Double），同时输出 `dueDateText`（本地时区 `yyyy-MM-dd HH:mm`，全天提醒为 `00:00`）——判断今天/过期/几天内直接用 `dueDateText`，勿手转 epoch。
-- **分区（section）字段**：查询命令**显式 `--list` 时自动带** `section`（列表结构查询的核心诉求，如「OKR 列表 → 健康/个人成长/财务…」）；无 `--list` 默认不带（性能，section 查询慢）。需要时 `--sections` 强制带 / `--no-sections` 强制跳过。
+- **分区（section）字段**：查询命令**显式 `--list` 时自动带** `section`（列表结构查询的核心诉求，如「OKR 列表 → 健康/个人成长/财务…」）；无 `--list` 默认不带（性能，section 查询慢）。需要时 `--sections` 强制带 / `--no-sections` 强制跳过；`--section`/`--tree` 与 `--no-sections` 互斥。
 - **结构视图 `--tree`**：`query --list X --tree`（`--list-id` 也可）直接渲染「分区 → 任务 → 子任务」层级树（含父子缩进）——查列表内部结构用它，别从平铺 JSON 自己拼。**要求列表解析唯一**：同名/前缀命中多个会报 `ambiguousList`，用 `--list-id <完整UUID>` 精确定位。
 - **输出格式自动切换**：终端（TTY）默认 `plain`，管道/agent 调用自动 `json`——agent 无需每次带 `--format json`；也可显式 `--format json|plain|count` 覆盖。
 - `count` 无完成态开关，始终显式输出 `{total, incomplete, completed, flagged, urgent, dueToday, overdue}`（默认 json，`--format plain` 给人看）。`count --by-list` 输出 `{total, incomplete, lists:[{id,title,icon,isGroup,parentTitle,total,…}]}`。
@@ -191,19 +191,20 @@ remindkit add "买牛奶" --list 测试列表 --due "2026-08-03 09:00" --priorit
   --url "https://example.com" --alarm-before 30 \
   --location "<地点>" --latitude <纬度> --longitude <经度>
 
-# 常用参数：--notes / --due (YYYY-MM-DD 全天 | YYYY-MM-DD HH:MM) / --start / --priority high|medium|low \
+# 常用参数：--notes / --due (YYYY-MM-DD 全天 | YYYY-MM-DD HH:MM) / --start / --priority high|medium|low|none \
 #   --repeat hourly|daily|weekdays|weekends|weekly|monthly|yearly / --every N / --days mon,tue,... / --until YYYY-MM-DD \
 #   --tag (可重复) / --urgent / --flagged / --parent <id>（子任务）/ --section <分区名>（归入已有分区，先 add-section）\
 #   --url / --alarm-at "YYYY-MM-DD HH:MM"（绝对时间提醒，可重复）/ --alarm-before N（截止前 N 分钟）\
 #   --location <地名> --latitude X --longitude Y [--proximity arrive|leave]（位置提醒）\
 #   复杂重复：--repeat monthly --on-day 15 / --repeat monthly --last-workday \
 #     --repeat yearly --months 3,8 --on-weekday sun:1（每年3、8月第一个周日）\
+#   --due 与 --start 同时给出时，必须同为全天日期或同为带时间日期（Apple 只存一个 allDay 状态）\
 #   注意：--repeat 未给 --due 时自动算下一个符合规则的日期作为到期日
 
 # 批量操作（先条件选择，再统一执行）
 remindkit bulk --op complete --list 待办 --due-before 2026-08-02   # 完成待办里过期的
 remindkit bulk --op delete --list 测试列表 --all --dry-run         # 先预览再删
-remindkit bulk --op delete --list 测试列表 --all --yes             # 预览确认后批量删除（--yes 必需）
+remindkit bulk --op delete --list 测试列表 --all --yes             # 预览确认后批量软删除（--yes 必需，可 recently-deleted/restore）
 remindkit bulk --op move --list 收集箱 --to 目的地 --yes             # 收集箱的移到目的地（--yes 必需）
 remindkit bulk --op update --list 购物 --flag                       # 批量加旗标
 remindkit bulk --op update --list 收集箱 --notes-append "统一标注"   # 批量备注追加（40+ 次循环的替代）
@@ -211,7 +212,7 @@ remindkit bulk --op update --list 收集箱 --notes "覆盖全部备注"       #
 remindkit bulk --op update --list 日用品 --tag-add 日用品采购         # 批量打标签（迁移/整理常用；#18）
 remindkit bulk --op update --list 日用品 --tag-remove 日用品采购     # 批量去标签
 # 选择器：--list/--tag/--flagged/--urgent/--due-after/--due-before（至少一个）
-# 安全：--dry-run 预览；--limit N 上限（默认 50，超出拒绝）；delete/move 是破坏性写，必须 --yes
+# 安全：--dry-run 只预览、不需 --yes；--limit N 上限（默认 50，超出拒绝）；真正执行 delete/move 时必须 --yes
 #       update 至少带一个更新字段（--flag/--no-flag/--urgent/--no-urgent/--notes/--notes-append/--tag-add/--tag-remove）
 
 # 完成 / 重开 / 删除 / 移动 / 旗标紧急
@@ -222,9 +223,11 @@ remindkit update <id> --notes-append "补充信息"   # 备注追加（省一次
 remindkit update <id> --no-flag --urgent   # 去旗标 + 标紧急（可组合）
 remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --notes "备注" \\
   --priority high --tag 购物 --url "https://…" --repeat weekly --days mon,wed --until 2026-09-01
-  # 更新字段：--title/--notes/--due/--start/--priority/--tag(可重复)/--url/--repeat/--days/--until/--section(移入分区)
+  # 更新字段：--title/--notes/--due/--start/--priority/--tag(可重复)/--url/--repeat/--no-repeat/--days/--until/--section(移入分区)
+  # 重复语义：--repeat 会替换全部已有规则（不会追加）；--no-repeat 清除全部重复规则
+  # 字段语义：--priority none 清除优先级；--url 替换旧 URL 且保留其他附件
   # 提醒：--alarm-at "YYYY-MM-DD HH:MM"(可重复)/--alarm-before N(--due 或当前 dueDate 为基准)/--location+经纬度
-  # 至少指定一个字段或旗标；EventKit 兜底时 tags/repeat/flag/urgent/section/url/alarm/location 标记 degraded
+  # 至少指定一个字段或旗标；EventKit 兜底时 tags/flag/urgent/section/url/alarm/location 标记 degraded
 remindkit update <id> --parent <父提醒ID>   # 把普通任务挂为父任务的子任务（父须同列表、本身非子任务、无孙任务）
 remindkit update <id> --no-parent           # 解除父子关系（子任务变回普通任务，留在原列表）
 remindkit delete <id>          # 软删除 → 最近删除（30 天后系统清除）；无 EventKit 兜底（需 ReminderKit 子进程，避免硬删）

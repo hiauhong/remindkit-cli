@@ -56,11 +56,13 @@ func runAuthorize(check: Bool, verify: Bool, json: Bool) throws {
 /// reminders now that permission is granted — TCC grants belong to the
 /// responsible host process, so the subprocess inherits it too.
 private func verifyPrimaryPath() -> String {
-    if let rk = runReminderKitSubprocess(includeSections: false),
-       let reminders = rk.reminders {
+    switch runReminderKitSubprocess(includeSections: false) {
+    case let .success(rk):
+        let reminders = rk.reminders ?? []
         return "ok (\(reminders.count) reminders)"
+    case let .unavailable(detail), let .failed(detail):
+        return "failed (\(detail))"
     }
-    return "failed (subprocess could not read reminders)"
 }
 
 private func emitAuthorizeState(access: RemindersAccessState, host: String,

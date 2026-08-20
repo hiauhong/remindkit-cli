@@ -2,6 +2,19 @@ import ArgumentParser
 import EventKitCore
 import Foundation
 
+func validateQuerySectionOptions(section: String?, noSections: Bool,
+                                 tree: Bool, smartList: String?) throws {
+    if noSections && section != nil {
+        throw ValidationError("--section and --no-sections are mutually exclusive")
+    }
+    if noSections && tree {
+        throw ValidationError("--tree and --no-sections are mutually exclusive")
+    }
+    if tree && smartList != nil {
+        throw ValidationError("--tree does not support --smart-list: smart-list section membership is not available in the read schema")
+    }
+}
+
 struct Query: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "query",
@@ -14,7 +27,7 @@ struct Query: ParsableCommand {
     @Option(name: .long, help: "Filter by list ID (preferred; disambiguates same-named lists)")
     var listId: String?
 
-    @Option(name: .long, help: "Evaluate a smart list by name or UUID (returns reminders matching its filter; works with --tree)")
+    @Option(name: .long, help: "Evaluate a smart list by name or UUID (returns reminders matching its supported filter)")
     var smartList: String?
 
     @Option(name: .long, help: "Filter by tag name")
@@ -69,6 +82,8 @@ struct Query: ParsableCommand {
         if section != nil && list == nil && listId == nil && smartList == nil {
             throw ValidationError("--section requires --list, --list-id, or --smart-list (sections are list-scoped)")
         }
+        try validateQuerySectionOptions(section: section, noSections: noSections,
+                                        tree: tree, smartList: smartList)
     }
 
     func run() throws {

@@ -99,6 +99,10 @@ remindkit add "买牛奶" --list 日常 --due "2026-08-03 09:00" --priority high
   --repeat weekly --days mon,wed --tag 购物 --urgent --flagged \
   --notes "备注" --url "https://…" --alarm-before 30
 remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --priority medium --tag 生活
+remindkit update <id> --priority none   # 清除优先级
+remindkit update <id> --url "https://example.com/new"  # 替换旧 URL
+remindkit update <id> --repeat monthly  # 替换全部已有重复规则，不会追加
+remindkit update <id> --no-repeat       # 清除全部重复规则
 remindkit complete <id>          # 重复提醒完成后自动滚动到下一期，响应带 nextOccurrence
 remindkit delete <id>            # 软删除 → 最近删除（30 天系统清除）
 remindkit move <id> --to 日常
@@ -110,8 +114,9 @@ remindkit add-section "项目A" "待办"                     # ③ 分区
 remindkit add "写周报" --list "项目A" --section "待办"    # ④ 任务
 remindkit add "整理大纲" --list "项目A" --parent <写周报的ID>   # ⑤ 子任务（可继续嵌套）
 
-# 批量
-remindkit bulk --op complete --list 日常 --due-before 2026-08-02   # 先 --dry-run 预览
+# 批量：破坏性操作预览时不需 --yes，真正执行时才需
+remindkit bulk --op delete --list 日常 --due-before 2026-08-02 --dry-run
+remindkit bulk --op delete --list 日常 --due-before 2026-08-02 --yes  # 软删除，可 recently-deleted/restore
 ```
 
 > **安全约定**：同名列表（如两个「数码」「财务」）务必用 ID 定位；`delete-list` 永久删除需 `--yes`；测试写操作只在「测试冒烟*」列表上进行（自建自删、零残留）。
@@ -139,9 +144,12 @@ remindkit bulk --op complete --list 日常 --due-before 2026-08-02   # 先 --dry
 ## 开发
 
 ```bash
-make build    # 编译(ObjC 子二进制 + Swift CLI)
-make test     # 冒烟测试 + skill 契约测试
+make build             # 编译（ObjC 子二进制 + Swift CLI）
+make test-regressions  # 日常聚焦回归：只测近期高风险改动
+make test              # 合并/发版前：完整冒烟 + skill 契约测试
 ```
+
+两种冒烟测试都只操作本次创建的「测试冒烟*」实体，并按记录的精确 UUID 清理；不会按名称前缀批量删除。
 
 ## License
 

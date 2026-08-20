@@ -98,16 +98,18 @@ public struct RemindersWriter {
         try store.save(reminder, commit: true)
     }
 
-    /// Update core fields on an existing reminder. tags/repeat/flag/urgent
-    /// are NOT writable via EventKit — callers mark those as degraded.
+    /// Update core fields on an existing reminder. A non-nil recurrenceRules
+    /// value replaces the entire rule array; an empty array clears recurrence.
+    /// tags/flag/urgent remain unavailable through EventKit.
     public func update(_ reminder: EKReminder, title: String?, notes: String?,
                        due: DateComponents?, start: DateComponents?,
-                       priority: Int?) throws {
+                       priority: Int?, recurrenceRules: [EKRecurrenceRule]? = nil) throws {
         if let title { reminder.title = title }
         if let notes { reminder.notes = notes }
         if let due { reminder.dueDateComponents = due }
         if let start { reminder.startDateComponents = start }
         if let priority { reminder.priority = priority }
+        if let recurrenceRules { reminder.recurrenceRules = recurrenceRules }
         try store.save(reminder, commit: true)
     }
 

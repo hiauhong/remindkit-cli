@@ -12,7 +12,7 @@ func fetchEnrichedData(includeSections: Bool = true) -> EnrichedData {
     // ReminderKit is primary. We trust a subprocess that produced a `reminders`
     // key even when the array is empty (a genuinely empty database must not be
     // misreported as an EventKit fallback, nor force a second fetch).
-    if let rk = runReminderKitSubprocess(includeSections: includeSections),
+    if case let .success(rk) = runReminderKitSubprocess(includeSections: includeSections),
        let rawReminders = rk.reminders {
         return EnrichedData(
             reminders: mergedReminders(from: rawReminders),
@@ -47,7 +47,7 @@ struct EnrichedData {
 /// its structure alone; `setup --deep` uses the full `fetchEnrichedData`
 /// (structure + contents).
 func fetchListStructure() -> EnrichedData {
-    if let rk = runReminderKitSubprocess(includeSections: true, listsOnly: true),
+    if case let .success(rk) = runReminderKitSubprocess(includeSections: true, listsOnly: true),
        let rawLists = rk.lists {
         return EnrichedData(
             reminders: [],

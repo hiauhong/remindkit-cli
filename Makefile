@@ -15,7 +15,7 @@ REMINDKIT_SRC_DIR = Sources/CReminderKit
 REMINDKIT_SRCS = $(wildcard $(REMINDKIT_SRC_DIR)/*.m)
 REMINDKIT_BIN = Binaries/fetch-remindkit
 
-.PHONY: build build-cbinary build-cli clean test
+.PHONY: build build-cbinary build-cli clean test test-regressions
 
 build: build-cbinary build-cli
 
@@ -33,6 +33,9 @@ build-cli: $(REMINDKIT_BIN)
 test: build
 	bash Scripts/smoke-test.sh
 	bash Scripts/skill-contract-test.sh
+
+test-regressions: build
+	bash Scripts/smoke-test.sh --regressions
 
 clean:
 	rm -f $(REMINDKIT_BIN)

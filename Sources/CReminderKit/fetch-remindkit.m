@@ -53,11 +53,23 @@ int main(int argc, const char *argv[]) {
         // default evaluates from structure alone and never touches contents)
         NSMutableArray *reminderEntries = [NSMutableArray array];
         if (!listsOnly) {
-            fetchReminders(store, sectionedListUUIDs, reminderEntries);
+            NSString *fetchError = nil;
+            if (!fetchReminders(store, sectionedListUUIDs, reminderEntries, &fetchError)) {
+                NSDictionary *failure = @{
+                    @"ok": @NO,
+                    @"error": fetchError ?: @"failed to fetch reminders",
+                };
+                NSData *failureJSON = [NSJSONSerialization dataWithJSONObject:failure options:0 error:NULL];
+                printf("%s", failureJSON
+                    ? [[[NSString alloc] initWithData:failureJSON encoding:NSUTF8StringEncoding] UTF8String]
+                    : "{\"ok\":false,\"error\":\"failed to fetch reminders\"}");
+                return 1;
+            }
         }
 
         // 4) Build output
         NSDictionary *output = @{
+            @"ok": @YES,
             @"smartLists": smartLists,
             @"listIDsOrdering": listIDsOrdering,
             @"lists": listEntries,

@@ -33,10 +33,11 @@ struct Doctor: ParsableCommand {
         // Probe the actual data path: does the subprocess yield reminders?
         var subprocessStatus = "missing"
         if subprocess {
-            if let rk = runReminderKitSubprocess(includeSections: false), rk.reminders != nil {
+            switch runReminderKitSubprocess(includeSections: false) {
+            case let .success(rk):
                 subprocessStatus = "ok (\(rk.reminders?.count ?? 0) reminders)"
-            } else {
-                subprocessStatus = "failed"
+            case let .unavailable(detail), let .failed(detail):
+                subprocessStatus = "failed (\(detail))"
             }
         }
         let primary = subprocessStatus.hasPrefix("ok") ? "reminderKit" : "eventKit (fallback)"

@@ -9,7 +9,7 @@ NSArray *fetchListIDsOrdering(id store);
 NSDictionary *fetchGroups(id store);
 NSArray *fetchLists(id store, id groups);
 NSSet *collectSectionedListUUIDs(NSArray *listEntries);
-void fetchReminders(id store, NSSet *sectionedListUUIDs,
-                    NSMutableArray *reminderEntries);
+BOOL fetchReminders(id store, NSSet *sectionedListUUIDs,
+                    NSMutableArray *reminderEntries, NSString **errorMessage);
 
 NSDictionary *executeWriteRequest(id store, NSDictionary *req);

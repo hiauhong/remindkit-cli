@@ -119,10 +119,17 @@ func fetchEventKitData() -> EventKitRaw {
 /// sectioned lists through remindd) when the caller doesn't need the field.
 /// Pass `listsOnly: true` to skip reminder enumeration entirely (structure
 /// only — `setup`'s default evaluates lists without reading their contents).
-func runReminderKitSubprocess(includeSections: Bool = true, listsOnly: Bool = false) -> ReminderKitRaw? {
+enum ReminderKitReadOutcome {
+    case success(ReminderKitRaw)
+    case unavailable(String)
+    case failed(String)
+}
+
+func runReminderKitSubprocess(includeSections: Bool = true, listsOnly: Bool = false) -> ReminderKitReadOutcome {
     guard let binaryURL = findSubprocessBinary() else {
-        fputs("remindkit: warning: ReminderKit subprocess not found, falling back to EventKit\n", stderr)
-        return nil
+        let detail = "ReminderKit subprocess not found"
+        fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+        return .unavailable(detail)
     }
 
     let process = Process()
@@ -153,27 +160,57 @@ func runReminderKitSubprocess(includeSections: Bool = true, listsOnly: Bool = fa
 
     do {
         try process.run()
-        if !waitForExit(process) {
-            fputs("remindkit: warning: ReminderKit subprocess timed out, falling back to EventKit\n", stderr)
-            return nil
-        }
-        doneReading.wait()
-        doneErr.wait()
+    } catch {
+        let detail = "ReminderKit subprocess failed to start: \(error.localizedDescription)"
+        fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+        return .unavailable(detail)
+    }
 
-        guard !(outputBox.value?.isEmpty ?? true) else {
-            // Surface the subprocess stderr only when the run failed — on
-            // success it carries nothing but ReminderKit internal logs, which
-            // would pollute the caller's stderr for agents.
+    let exited = waitForExit(process)
+    doneReading.wait()
+    doneErr.wait()
+
+    guard exited else {
+        emitSubprocessStderr(errBox.value ?? Data())
+        let detail = "ReminderKit subprocess timed out"
+        fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+        return .failed(detail)
+    }
+
+    guard let output = outputBox.value, !output.isEmpty else {
+        emitSubprocessStderr(errBox.value ?? Data())
+        let detail = "ReminderKit subprocess produced no output"
+        fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+        return .failed(detail)
+    }
+
+    do {
+        let raw = try JSONDecoder().decode(ReminderKitRaw.self, from: output)
+        if raw.ok == false {
+            let detail = raw.error ?? "ReminderKit read failed"
             emitSubprocessStderr(errBox.value ?? Data())
-            fputs("remindkit: warning: ReminderKit subprocess produced no output, falling back to EventKit\n", stderr)
-            return nil
+            fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+            return .failed(detail)
         }
-
-        return try JSONDecoder().decode(ReminderKitRaw.self, from: outputBox.value!)
+        if process.terminationStatus != 0 {
+            let detail = raw.error ?? "ReminderKit subprocess exited with status \(process.terminationStatus)"
+            emitSubprocessStderr(errBox.value ?? Data())
+            fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+            return .failed(detail)
+        }
+        if listsOnly ? raw.lists == nil : raw.reminders == nil {
+            let detail = listsOnly
+                ? "ReminderKit response did not contain lists"
+                : "ReminderKit response did not contain reminders"
+            fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+            return .failed(detail)
+        }
+        return .success(raw)
     } catch {
         emitSubprocessStderr(errBox.value ?? Data())
-        fputs("remindkit: warning: ReminderKit subprocess failed, falling back to EventKit: \(error.localizedDescription)\n", stderr)
-        return nil
+        let detail = "invalid ReminderKit response: \(error.localizedDescription)"
+        fputs("remindkit: warning: \(detail), falling back to EventKit\n", stderr)
+        return .failed(detail)
     }
 }
 

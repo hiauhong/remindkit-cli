@@ -2,6 +2,10 @@ import ArgumentParser
 import EventKitCore
 import Foundation
 
+func bulkConfirmationRequired(op: String, dryRun: Bool, yes: Bool) -> Bool {
+    ["delete", "move"].contains(op.lowercased()) && !dryRun && !yes
+}
+
 /// Bulk operations: select reminders by query conditions, then run one
 /// write op on all of them. The selector reuses query's filter semantics;
 /// --dry-run previews what would change; --limit caps the batch size so an
@@ -95,8 +99,9 @@ struct Bulk: ParsableCommand {
         if op.lowercased() == "move" && to == nil {
             throw ValidationError("move 需要 --to <目标列表>")
         }
-        // 破坏性写契约：delete / move 必须显式 --yes。
-        if ["delete", "move"].contains(op.lowercased()) && !yes {
+        // Preview is read-only. Confirmation is required only when the
+        // destructive operation will actually execute.
+        if bulkConfirmationRequired(op: op, dryRun: dryRun, yes: yes) {
             throw ValidationError("bulk --op \(op.lowercased()) 是破坏性写，必须显式确认：加 --yes")
         }
         if op.lowercased() == "update" && !flag && !noFlag && !urgentOp && !noUrgentOp
@@ -200,9 +205,16 @@ struct Bulk: ParsableCommand {
             let request: [String: Any] = ["op": "delete", "id": id, "author": "remindkit"]
             // EventKit fallback 禁用（同单条 delete）：公开 API 是硬删除，会
             // 绕过「最近删除」；子进程不可用时直接失败。
-            let (source, _) = try writeWithReminderKit(request) {
+            let (source, result) = try writeWithReminderKit(request) {
                 fail("reminderKitRequired",
                      "批量删除需要 ReminderKit 子进程（EventKit 兜底是硬删除，已禁用）。请检查子进程可用性。")
+            }
+            if let title = result["title"] as? String,
+               let listName = result["listName"] as? String {
+                appendDeletedRecord(DeletedRecord(
+                    id: id, title: title, listName: listName,
+                    deletedAt: Date().timeIntervalSince1970
+                ))
             }
             return ["source": source]
         case "move":

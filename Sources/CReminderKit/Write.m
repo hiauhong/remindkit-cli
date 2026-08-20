@@ -169,7 +169,7 @@ static NSDictionary *setReminderSmartListSection(id store, id saveReq, id smartL
     if (!smartList) return @{@"ok": @NO, @"error": @"无法确定智能列表"};
     id section = findSectionInSmartList(store, smartList, sectionName);
     if (!section) {
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+        return @{@"ok": @NO, @"code": @"noSuchSection", @"error": [NSString stringWithFormat:
             @"智能列表「%@」中没有分区「%@」（先用 add-section 创建）",
             [smartList valueForKey:@"name"] ?: @"", sectionName]};
     }
@@ -623,8 +623,15 @@ static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDict
         [remCI setValue:hts forKey:@"hashtags"];
         changes[@"tags"] = tags;
     }
+    if ([req[@"clearRecurrence"] boolValue]) {
+        ((void(*)(id, SEL))objc_msgSend)(remCI, NSSelectorFromString(@"removeAllRecurrenceRules"));
+        changes[@"recurrence"] = @NO;
+    }
     NSDictionary *recur = req[@"recurrence"];
     if ([recur isKindOfClass:[NSDictionary class]]) {
+        // update semantics are replacement, not append. Clearing first also
+        // repairs reminders that already accumulated duplicate rules.
+        ((void(*)(id, SEL))objc_msgSend)(remCI, NSSelectorFromString(@"removeAllRecurrenceRules"));
         NSUInteger freq = [recur[@"frequency"] unsignedIntegerValue];
         NSUInteger interval = [recur[@"interval"] unsignedIntegerValue];
         id days = nil;
@@ -673,7 +680,14 @@ static NSDictionary *applyEditableFields(id store, id reminder, id remCI, NSDict
             NSSelectorFromString(@"initWithObjectID:accountID:reminderID:url:metadata:"),
             attObjID, acctObjID, remObjID, [NSURL URLWithString:urlStr], nil);
         NSArray *existing = [remCI valueForKey:@"attachments"] ?: @[];
-        [remCI setValue:[existing arrayByAddingObject:att] forKey:@"attachments"];
+        NSMutableArray *replaced = [NSMutableArray arrayWithCapacity:existing.count + 1];
+        for (id existingAttachment in existing) {
+            if (![NSStringFromClass([existingAttachment class]) isEqualToString:@"REMURLAttachment"]) {
+                [replaced addObject:existingAttachment];
+            }
+        }
+        [replaced addObject:att];
+        [remCI setValue:replaced forKey:@"attachments"];
         changes[@"url"] = urlStr;
     }
     NSArray *alarms = req[@"alarms"];
@@ -922,98 +936,126 @@ static NSDictionary *opRestore(id store, NSDictionary *req) {
     return @{@"ok": @YES, @"id": extId, @"listName": listName};
 }
 
-/// Delete a list (regular list or custom smart list).
+/// Collect matching regular lists, custom smart lists, and groups using one
+/// resolution rule. An explicit --id only matches IDs; otherwise the
+/// positional value may be a case-insensitive exact name, full UUID, or an
+/// unambiguous UUID prefix of at least eight characters.
+static NSArray *collectListFamilyCandidates(id store, NSString *listID,
+                                             NSString *name, NSString *typeFilter) {
+    NSMutableArray *candidates = [NSMutableArray array];  // {obj, type}
+    NSString *target = listID.length > 0 ? listID : name;
+
+    BOOL (^matches)(id) = ^BOOL(id obj) {
+        NSString *uuid = extractUUID([obj valueForKey:@"objectID"]);
+        if (listID.length > 0) {
+            return uuid && ([uuid isEqualToString:listID] ||
+                (listID.length >= 8 && [uuid.lowercaseString hasPrefix:listID.lowercaseString]));
+        }
+        NSString *objectName = [obj valueForKey:@"name"];
+        BOOL nameMatch = [objectName isKindOfClass:[NSString class]] &&
+            [objectName caseInsensitiveCompare:name] == NSOrderedSame;
+        BOOL idMatch = uuid && target.length > 0 &&
+            ([uuid isEqualToString:target] ||
+             (target.length >= 8 && [uuid.lowercaseString hasPrefix:target.lowercaseString]));
+        return nameMatch || idMatch;
+    };
+
+    if (typeFilter.length == 0 || [typeFilter.lowercaseString isEqualToString:@"list"]) {
+        NSMutableArray *matchesForBlock = [NSMutableArray array];
+        void (^listBlock)(id, BOOL *) = ^(id list, BOOL *stop) {
+            if (matches(list)) [matchesForBlock addObject:list];
+        };
+        ((void(*)(id, SEL, id))objc_msgSend)(store,
+            NSSelectorFromString(@"enumerateAllListsWithBlock:"), listBlock);
+        for (id list in matchesForBlock) {
+            [candidates addObject:@{@"obj": list, @"type": @"list"}];
+        }
+    }
+
+    if (typeFilter.length == 0 || [typeFilter.lowercaseString isEqualToString:@"smartlist"]) {
+        NSError *smartListError = nil;
+        id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store,
+            NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &smartListError);
+        if ([smartLists isKindOfClass:[NSArray class]]) {
+            for (id smartList in (NSArray *)smartLists) {
+                if (matches(smartList)) {
+                    [candidates addObject:@{@"obj": smartList, @"type": @"smartList"}];
+                }
+            }
+        }
+    }
+
+    if (typeFilter.length == 0 || [typeFilter.lowercaseString isEqualToString:@"group"]) {
+        NSDictionary *groups = fetchAllGroups(store);
+        for (NSString *uuid in groups) {
+            id group = groups[uuid];
+            if (matches(group)) {
+                [candidates addObject:@{@"obj": group, @"type": @"group"}];
+            }
+        }
+    }
+
+    return candidates;
+}
+
+static NSDictionary *listFamilyResolutionError(NSArray *candidates, NSString *target,
+                                                 NSString *typeFilter) {
+    if (candidates.count == 0) {
+        if ([typeFilter.lowercaseString isEqualToString:@"group"]) {
+            return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到分组：%@", target ?: @""]};
+        }
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", target ?: @""]};
+    }
+    if (candidates.count == 1) return nil;
+
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSDictionary *candidate in candidates) {
+        id obj = candidate[@"obj"];
+        NSString *uuid = extractUUID([obj valueForKey:@"objectID"]) ?: @"";
+        NSString *name = [[obj valueForKey:@"name"] isKindOfClass:[NSString class]]
+            ? [obj valueForKey:@"name"] : @"";
+        [parts addObject:[NSString stringWithFormat:@"%@: %@[%@]", candidate[@"type"], name, uuid]];
+    }
+    return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+        @"名称「%@」匹配到 %lu 个（跨列表/智能列表/分组），请用 --id <完整UUID> 精确定位：%@",
+        target ?: @"", (unsigned long)candidates.count, [parts componentsJoinedByString:@", "]]};
+}
+
+/// Delete a list (regular list, custom smart list, or group).
 static NSDictionary *opDeleteList(id store, NSDictionary *req) {
     NSString *name = req[@"listName"];
+    NSString *listID = req[@"listID"];
+    NSString *target = listID.length > 0 ? listID : name;
+    NSArray *candidates = collectListFamilyCandidates(store, listID, name, nil);
+    NSDictionary *resolutionError = listFamilyResolutionError(candidates, target, nil);
+    if (resolutionError) return resolutionError;
+
+    NSDictionary *candidate = candidates[0];
+    id obj = candidate[@"obj"];
+    NSString *type = candidate[@"type"];
     NSError *err = nil;
     id saveReq = makeSaveRequest(store, req[@"author"]);
 
-    // 1) regular list: updateList: -> removeFromParent.
-    //    Ambiguity (same-named lists) must error out; only "not found" may
-    //    fall through to the smart-list check below.
-    NSDictionary *listErr = nil;
-    id list = resolveList(store, req[@"listID"], name, &listErr);
-    if (listErr && ![listErr[@"error"] hasPrefix:@"找不到列表"]) {
-        return listErr;
-    }
-    if (list) {
-        id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), list);
+    if ([type isEqualToString:@"list"] || [type isEqualToString:@"group"]) {
+        id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq,
+            NSSelectorFromString(@"updateList:"), obj);
         ((void(*)(id, SEL))objc_msgSend)(listCI, NSSelectorFromString(@"removeFromParent"));
         if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-        return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"list", @"deleted": @YES};
+        return @{@"ok": @YES, @"listName": name ?: @"", @"type": type, @"deleted": @YES};
     }
 
-    // 2) custom smart list: updateSmartList: -> removeFromParentWithAccountChangeItem:
-    //    先收集所有命中，重名时明确报错（与普通列表一致），绝不随机删第一个。
-    id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
-    NSMutableArray *slMatches = [NSMutableArray array];
-    for (id sl in (NSArray *)smartLists) {
-        NSString *slUUID = extractUUID([sl valueForKey:@"objectID"]);
-        BOOL nameMatch = ([name isKindOfClass:[NSString class]] && [[sl valueForKey:@"name"] isEqualToString:name]);
-        BOOL idMatch = (req[@"listID"] && slUUID &&
-                        ([slUUID isEqualToString:req[@"listID"]] ||
-                         ([req[@"listID"] length] >= 8 && [slUUID.lowercaseString hasPrefix:[req[@"listID"] lowercaseString]])));
-        if (nameMatch || idMatch) {
-            [slMatches addObject:sl];
-        }
-    }
-    if (slMatches.count > 1) {
-        NSMutableArray *titles = [NSMutableArray array];
-        for (id sl in slMatches) {
-            NSString *slName = [sl valueForKey:@"name"] ?: @"";
-            NSString *slU = extractUUID([sl valueForKey:@"objectID"]) ?: @"";
-            [titles addObject:[NSString stringWithFormat:@"%@[%@]", slName, slU]];
-        }
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
-            @"智能列表名「%@」匹配到 %lu 个（名称重复），请用 --id <完整UUID> 精确定位：%@",
-            name ?: @"", (unsigned long)slMatches.count, [titles componentsJoinedByString:@", "]]};
-    }
-    if (slMatches.count == 1) {
-        id sl = slMatches[0];
-        id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
-        id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
-        if (!acct) return @{@"ok": @NO, @"error": @"找不到账户"};
-        id acctCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateAccount:"), acct);
-        id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), sl);
-        ((void(*)(id, SEL, id))objc_msgSend)(slCI,
-            NSSelectorFromString(@"removeFromParentWithAccountChangeItem:"), acctCI);
-        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-        return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"smartList", @"deleted": @YES};
-    }
-
-    // 3) group (folder): groups are REMLists (isGroup) not covered by
-    //    enumerateAllListsWithBlock:, so resolve them via account group context.
-    //    同样先收集所有命中，重名报错。
-    NSDictionary *groups = fetchAllGroups(store);
-    NSMutableArray *gMatches = [NSMutableArray array];
-    for (NSString *uuid in groups) {
-        id g = groups[uuid];
-        BOOL nameMatch = ([name isKindOfClass:[NSString class]] && [[g valueForKey:@"name"] isEqualToString:name]);
-        BOOL idMatch = (req[@"listID"] && [uuid isEqualToString:req[@"listID"]]);
-        if (nameMatch || idMatch) {
-            [gMatches addObject:g];
-        }
-    }
-    if (gMatches.count > 1) {
-        NSMutableArray *titles = [NSMutableArray array];
-        for (id g in gMatches) {
-            NSString *gName = [g valueForKey:@"name"] ?: @"";
-            NSString *gU = extractUUID([g valueForKey:@"objectID"]) ?: @"";
-            [titles addObject:[NSString stringWithFormat:@"%@[%@]", gName, gU]];
-        }
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
-            @"分组名「%@」匹配到 %lu 个（名称重复），请用 --id <完整UUID> 精确定位：%@",
-            name ?: @"", (unsigned long)gMatches.count, [titles componentsJoinedByString:@", "]]};
-    }
-    if (gMatches.count == 1) {
-        id g = gMatches[0];
-        id gci = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), g);
-        ((void(*)(id, SEL))objc_msgSend)(gci, NSSelectorFromString(@"removeFromParent"));
-        if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-        return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"group", @"deleted": @YES};
-    }
-
-    return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", req[@"listID"] ?: (name ?: @"")]};
+    id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store,
+        NSSelectorFromString(@"fetchAccountsWithError:"), &err);
+    id account = [accounts isKindOfClass:[NSArray class]] && [accounts count] > 0 ? accounts[0] : nil;
+    if (!account) return @{@"ok": @NO, @"error": @"找不到账户"};
+    id accountCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq,
+        NSSelectorFromString(@"updateAccount:"), account);
+    id smartListCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq,
+        NSSelectorFromString(@"updateSmartList:"), obj);
+    ((void(*)(id, SEL, id))objc_msgSend)(smartListCI,
+        NSSelectorFromString(@"removeFromParentWithAccountChangeItem:"), accountCI);
+    if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+    return @{@"ok": @YES, @"listName": name ?: @"", @"type": @"smartList", @"deleted": @YES};
 }
 
 /// Update a list's name / icon / color, or a group / smart list's name.
@@ -1028,101 +1070,10 @@ static NSDictionary *opUpdateList(id store, NSDictionary *req) {
     NSString *listID = req[@"listID"];
     NSString *typeFilter = req[@"type"];
 
-    NSMutableArray *candidates = [NSMutableArray array];  // {obj, type}
-    // ID matching applies to the positional name too (resolveList precedent):
-    // `update-list <uuid|prefix>` works without --id. Name matching only when
-    // no explicit --id (avoid matching a name while an ID was given).
     NSString *target = listID.length > 0 ? listID : name;
-
-    void (^collectLists)(void) = ^{
-        if (typeFilter.length > 0 && ![typeFilter.lowercaseString isEqualToString:@"list"]) return;
-        NSMutableArray *matches = [NSMutableArray array];
-        void (^lb)(id, BOOL *) = ^(id list, BOOL *sp) {
-            NSString *u = extractUUID([list valueForKey:@"objectID"]);
-            BOOL hit = NO;
-            if (listID.length > 0) {
-                hit = (u && ([u isEqualToString:listID] ||
-                             (listID.length >= 8 && [u.lowercaseString hasPrefix:listID.lowercaseString])));
-            } else {
-                NSString *n = [list valueForKey:@"name"];
-                hit = ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame);
-                if (!hit && u && target.length > 0) {
-                    hit = ([u isEqualToString:target] ||
-                           (target.length >= 8 && [u.lowercaseString hasPrefix:target.lowercaseString]));
-                }
-            }
-            if (hit) [matches addObject:list];  // non-ARC: array retains
-        };
-        ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), lb);
-        for (id l in matches) [candidates addObject:@{@"obj": l, @"type": @"list"}];
-    };
-
-    void (^collectSmartLists)(void) = ^{
-        if (typeFilter.length > 0 && ![typeFilter.lowercaseString isEqualToString:@"smartlist"]) return;
-        NSError *err = nil;
-        id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
-        if (![smartLists isKindOfClass:[NSArray class]]) return;
-        for (id sl in (NSArray *)smartLists) {
-            NSString *u = extractUUID([sl valueForKey:@"objectID"]);
-            BOOL hit = NO;
-            if (listID.length > 0) {
-                hit = (u && ([u isEqualToString:listID] ||
-                             (listID.length >= 8 && [u.lowercaseString hasPrefix:listID.lowercaseString])));
-            } else {
-                NSString *n = [sl valueForKey:@"name"];
-                hit = ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame);
-                if (!hit && u && target.length > 0) {
-                    hit = ([u isEqualToString:target] ||
-                           (target.length >= 8 && [u.lowercaseString hasPrefix:target.lowercaseString]));
-                }
-            }
-            if (hit) [candidates addObject:@{@"obj": sl, @"type": @"smartList"}];
-        }
-    };
-
-    void (^collectGroups)(void) = ^{
-        if (typeFilter.length > 0 && ![typeFilter.lowercaseString isEqualToString:@"group"]) return;
-        NSDictionary *groups = fetchAllGroups(store);
-        for (NSString *uuid in groups) {
-            id g = groups[uuid];
-            BOOL hit = NO;
-            if (listID.length > 0) {
-                hit = ([uuid isEqualToString:listID] ||
-                       (listID.length >= 8 && [uuid.lowercaseString hasPrefix:listID.lowercaseString]));
-            } else {
-                NSString *n = [g valueForKey:@"name"];
-                hit = ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame);
-                if (!hit && target.length > 0) {
-                    hit = ([uuid isEqualToString:target] ||
-                           (target.length >= 8 && [uuid.lowercaseString hasPrefix:target.lowercaseString]));
-                }
-            }
-            if (hit) [candidates addObject:@{@"obj": g, @"type": @"group"}];
-        }
-    };
-
-    collectLists();
-    collectSmartLists();
-    collectGroups();
-
-    if (candidates.count == 0) {
-        if (typeFilter.length > 0 && [typeFilter.lowercaseString isEqualToString:@"group"]) {
-            return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到分组：%@", target]};
-        }
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到列表：%@", target]};
-    }
-    if (candidates.count > 1) {
-        NSMutableArray *parts = [NSMutableArray array];
-        for (NSDictionary *c in candidates) {
-            id obj = c[@"obj"];
-            NSString *u = extractUUID([obj valueForKey:@"objectID"]) ?: @"";
-            NSString *n = [[obj valueForKey:@"name"] isKindOfClass:[NSString class]] ? [obj valueForKey:@"name"] : @"";
-            [parts addObject:[NSString stringWithFormat:@"%@: %@[%@]", c[@"type"], n, u]];
-        }
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
-            @"名称「%@」匹配到 %lu 个（跨列表/智能列表/分组），请用 --id <完整UUID> 精确定位：%@",
-            target, (unsigned long)candidates.count, [parts componentsJoinedByString:@", "]]};
-    }
+    NSArray *candidates = collectListFamilyCandidates(store, listID, name, typeFilter);
+    NSDictionary *resolutionError = listFamilyResolutionError(candidates, target, typeFilter);
+    if (resolutionError) return resolutionError;
 
     NSDictionary *candidate = candidates[0];
     id obj = candidate[@"obj"];
@@ -1295,7 +1246,7 @@ static NSDictionary *setReminderSection(id store, id saveReq, id list, id remCI,
     if (!list) return @{@"ok": @NO, @"error": @"无法确定提醒所属列表"};
     id section = findSectionInList(store, list, sectionName);
     if (!section) {
-        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+        return @{@"ok": @NO, @"code": @"noSuchSection", @"error": [NSString stringWithFormat:
             @"列表「%@」中没有分区「%@」（先用 add-section 创建）",
             [list valueForKey:@"name"] ?: @"", sectionName]};
     }
@@ -1485,6 +1436,18 @@ static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
     id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
     id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
     if (!acct) return @{@"ok": @NO, @"error": @"找不到账户"};
+
+    id smartListsBefore = ((id(*)(id, SEL, id*))objc_msgSend)(store,
+        NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
+    if (![smartListsBefore isKindOfClass:[NSArray class]]) {
+        return @{@"ok": @NO, @"error": @"创建前无法读取智能列表，已取消创建"};
+    }
+    NSMutableSet *existingUUIDs = [NSMutableSet set];
+    for (id smartList in (NSArray *)smartListsBefore) {
+        NSString *uuid = extractUUID([smartList valueForKey:@"objectID"]);
+        if (uuid.length > 0) [existingUUIDs addObject:uuid];
+    }
+
     id saveReq = makeSaveRequest(store, req[@"author"]);
     id acctCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateAccount:"), acct);
     NSUUID *slUUID = [NSUUID UUID];
@@ -1538,22 +1501,39 @@ static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
     }
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
 
-    // ReminderKit may re-allocate the objectID we passed in; read the real
-    // uuid back so the returned id matches dump output (and delete works).
+    // ReminderKit may re-allocate the objectID we passed in. Identify the
+    // created object by the before/after UUID set difference; name lookup is
+    // unsafe because Reminders allows duplicate smart-list names.
     NSString *realUUID = nil;
-    id smartLists = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
-    for (id sl in (NSArray *)smartLists) {
-        NSString *slName = [sl valueForKey:@"name"];
-        NSString *slDisplay = [[sl valueForKey:@"customContext"] valueForKey:@"name"];
-        BOOL nameHit = ([slName isKindOfClass:[NSString class]] && [slName isEqualToString:name]);
-        BOOL displayHit = (displayName.length > 0 && [slDisplay isKindOfClass:[NSString class]]
-                           && [slDisplay isEqualToString:displayName]);
-        if (nameHit || displayHit) {
-            realUUID = extractUUID([sl valueForKey:@"objectID"]);
-            break;
+    NSString *changeItemUUID = extractUUID([slCI valueForKey:@"objectID"]);
+    NSMutableArray *lastNewUUIDs = [NSMutableArray array];
+    for (NSInteger attempt = 0; attempt < 30 && realUUID.length == 0; attempt++) {
+        id smartListsAfter = ((id(*)(id, SEL, id*))objc_msgSend)(store,
+            NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
+        [lastNewUUIDs removeAllObjects];
+        if ([smartListsAfter isKindOfClass:[NSArray class]]) {
+            for (id smartList in (NSArray *)smartListsAfter) {
+                NSString *uuid = extractUUID([smartList valueForKey:@"objectID"]);
+                if (uuid.length > 0 && ![existingUUIDs containsObject:uuid]) {
+                    [lastNewUUIDs addObject:uuid];
+                }
+            }
+        }
+        if (changeItemUUID.length > 0 && [lastNewUUIDs containsObject:changeItemUUID]) {
+            realUUID = changeItemUUID;
+        } else if (lastNewUUIDs.count == 1) {
+            realUUID = lastNewUUIDs[0];
+        } else if (attempt < 29) {
+            [NSThread sleepForTimeInterval:0.1];
+            changeItemUUID = extractUUID([slCI valueForKey:@"objectID"]);
         }
     }
-    return @{@"ok": @YES, @"id": realUUID ?: [slUUID UUIDString], @"name": name, @"type": @"smartList"};
+    if (realUUID.length == 0) {
+        return @{@"ok": @NO, @"error": [NSString stringWithFormat:
+            @"智能列表已创建，但 3 秒内无法确认其最终 ID；请勿重试创建，先运行 dump 检查（候选：%@）",
+            [lastNewUUIDs componentsJoinedByString:@", "]]};
+    }
+    return @{@"ok": @YES, @"id": realUUID, @"name": name, @"type": @"smartList"};
 }
 
 /// Move a list into/out of a group (folder) and optionally set its display
