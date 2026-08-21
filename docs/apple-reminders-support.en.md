@@ -14,8 +14,8 @@
 | Regular list | ✅ | Read (`list`), create (`add-list`), rename/icon/color (`update-list`), delete (`delete-list --yes`) |
 | List icon (emoji) | ✅ | Read + `update-list --icon` |
 | List color | ✅ | Read + `update-list --color` (12-color palette) |
-| Group (smart folder) | ✅ | **Read** fully (`list --groups`, parentUUID ownership); **write**: `add-group` creates, `add-list --group` files into, `update-list` renames (#15 unified dispatch), `delete-list` removes (verified: group = REMAccountGroupContext, no REMGroup class; Apple folders don't nest — single level) |
-| Smart list | ✅ | **Read** (smartLists field); **write**: `add-smartlist [--color]`, `update-list` renames (#15), deletion via `delete-list` |
+| Group (smart folder) | ✅ | **Read** fully (`list --groups`, parentUUID ownership); **write**: `add-group` creates, `add-list --group` files into, `update-list` renames (unified dispatch), `delete-list` removes (verified: group = REMAccountGroupContext, no REMGroup class; Apple folders don't nest — single level) |
+| Smart list | ✅ | **Read** (smartLists field); **write**: `add-smartlist [--color]`, `update-list` renames, deletion via `delete-list` |
 | Grocery list | ❌ | Apple's "Grocery" list type (auto-categorizes items: produce / dairy / baked goods, etc.) relies on ReminderKit category fields — **categories are not readable and the list type can't be created**; it can only be read as a plain list (titles/items visible, no category grouping) |
 | Sections | ✅ | **Read** (`[N sections]`); **write**: `add-section <list> <name>` creates; `add --section` / `update --section` file reminders into a section (REMMembership path) |
 | List ordering | 🟡 | Display order preserved on read; **write ordering not supported** |

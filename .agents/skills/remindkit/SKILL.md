@@ -73,7 +73,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - **分区 = 分类框架**：分区名（如视频/小红书/图文/运营）本身就是"什么条目属于此列表"的定义——判断某条目是否属于该列表，先看它落在哪个分区，再用分区语义定标准。
 - **列表备注 note = 领域模型**：`list --format json` 的 note 字段说明列表用途；分析前先读（`note --all` 也可）。
 - **杂项/兜底分区是重灾区**：无归属的分区（如「运营」「其他」）最容易混入不属于该列表的条目——分析时优先检查它们。
-- **智能列表（今天/旗标/已完成/已分配 + 自定义）是虚拟视图**：事项引用自普通列表；自定义智能列表**支持分区**（#16，`add-section --smart-list` 建、`query --smart-list` 求值），子任务在智能列表视图平铺显示（无父子缩进）。当前读 schema 无智能列表分区 membership，因此 `query --smart-list ... --tree` 明确报 unsupported，不伪造树。
+- **智能列表（今天/旗标/已完成/已分配 + 自定义）是虚拟视图**：事项引用自普通列表；自定义智能列表**支持分区**（`add-section --smart-list` 建、`query --smart-list` 求值），子任务在智能列表视图平铺显示（无父子缩进）。当前读 schema 无智能列表分区 membership，因此 `query --smart-list ... --tree` 明确报 unsupported，不伪造树。
 
 **分析结构化清单的流程（硬纪律）**：
 1. **先输出结构地图**：`list --format json`（全部列表+备注+分组）→ `query --list X --tree`（目标列表内部分区→任务→子任务树）
@@ -209,7 +209,7 @@ remindkit bulk --op move --list 收集箱 --to 目的地 --yes             # 收
 remindkit bulk --op update --list 购物 --flag                       # 批量加旗标
 remindkit bulk --op update --list 收集箱 --notes-append "统一标注"   # 批量备注追加（40+ 次循环的替代）
 remindkit bulk --op update --list 收集箱 --notes "覆盖全部备注"       # 批量覆盖备注
-remindkit bulk --op update --list 日用品 --tag-add 日用品采购         # 批量打标签（迁移/整理常用；#18）
+remindkit bulk --op update --list 日用品 --tag-add 日用品采购         # 批量打标签（迁移/整理常用）
 remindkit bulk --op update --list 日用品 --tag-remove 日用品采购     # 批量去标签
 # 选择器：--list/--tag/--flagged/--urgent/--due-after/--due-before（至少一个）
 # 安全：--dry-run 只预览、不需 --yes；--limit N 上限（默认 50，超出拒绝）；真正执行 delete/move 时必须 --yes
@@ -243,10 +243,10 @@ remindkit restore <id>         # 从最近删除恢复到原列表（ID 不变�
 # 新建 / 修改 / 删除列表族（列表 / 分组 / 智能列表）
 remindkit add-list "测试列表2"
 remindkit update-list "测试列表2" --new-name "测试列表3" --icon 🚀 --color red  # 12色板: red/orange/yellow/green/lightblue/blue/indigo/pink/purple/brown/gray/rose
-# update-list 统一派发列表族（#15）：列表/分组/智能列表同名同名冲突时报错列候选（带 list/smartList/group 类型标注），用 --id 或 --type 精确
+# update-list 统一派发列表族：列表/分组/智能列表同名同名冲突时报错列候选（带 list/smartList/group 类型标注），用 --id 或 --type 精确
 remindkit update-list 理财消费 --new-name 收入支出            # 分组改名（文件夹）
 remindkit update-list "重要" --new-name "重要事项" --type smartlist  # 智能列表改名（--type 逃生门，脚本场景）
-remindkit update-list "数码" --icon 🎮 --color rose --type smartlist  # 智能列表改图标/颜色（#19 扩展；分组仍仅支持改名）
+remindkit update-list "数码" --icon 🎮 --color rose --type smartlist  # 智能列表改图标/颜色（分组仍仅支持改名）
 # ⚠️ --color 传色板名（red/orange/yellow/green/lightblue/blue/indigo/pink/purple/brown/gray/rose）才能识别为色板色；
 #    传任意 hex 会回落 gray（App 显示灰色）——普通列表与智能列表同理
 remindkit update-list B1D35ED8 --new-name "数码购物"          # UUID 前缀定位（位置参数也按 ID 匹配）
@@ -260,7 +260,7 @@ remindkit add-section "项目A" "待办"            # 给列表加分区
 remindkit add "写周报" --list "项目A" --section "待办"   # 新建提醒时直接归入分区
 remindkit update <id> --section "进行中"         # 把已有提醒移入另一分区（先 add-section 创建）
 
-# 智能列表（虚拟视图，任务必须物理存在于普通列表；#16/#17/#19 2026-08-16）
+# 智能列表（虚拟视图，任务必须物理存在于普通列表；2026-08-16）
 remindkit add-smartlist "日用品" --tag 日用品采购 --color "#FF3B30" --group 收入支出  # 建智能列表 + hashtag 过滤 + 放入分组（--group 按名/UUID）
 remindkit add-section "日用品" "厨卫" --smart-list                    # 给智能列表加分区（--smart-list 标记）
 remindkit add "洗衣液" --list 日用品 --section "厨卫" --smart-list "日用品"  # 新建任务时归入智能列表分区（物理仍在该普通列表）
