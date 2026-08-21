@@ -7,8 +7,7 @@ on:
 
 jobs:
   build:
-    # repo 守卫：本 workflow 同时存在于 monorepo（cli/.github）与公开仓，
-    # 只在公开仓执行（monorepo 根目录没有 Package.swift，误跑会失败）。
+    # repo 守卫：仅在 remindkit-cli 仓库执行（避免在非发布仓库误跑）。
     if: github.repository == 'hiauhong/remindkit-cli'
     runs-on: macos-14 # arm64 runner, matches published binaries
     steps:

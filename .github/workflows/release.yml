@@ -1,8 +1,8 @@
 name: release
 
-# 发版流水线：推送 v* tag 到公开仓库 → 构建 → 打包 → GitHub Release → 更新 homebrew-tap。
-# 触发方：`./Scripts/publish.sh --release vX.Y.Z`（本地同步 + 打 tag + 推送）。
-# 本 workflow 同时存在于私有仓库，但用 repo 守卫只允许公开仓库执行。
+# 发版流水线：推送 v* tag 到仓库 → 构建 → 打包 → GitHub Release → 更新 homebrew-tap。
+# 触发方：本地发布脚本（同步 + 打 tag + 推送）。
+# repo 守卫：仅在 remindkit-cli 仓库执行。
 #
 # 需要的 secret：
 #   RELEASE_TOKEN — 用于推送 homebrew-tap（跨仓库，GITHUB_TOKEN 无权）。
