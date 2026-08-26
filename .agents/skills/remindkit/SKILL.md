@@ -7,7 +7,7 @@ allowed-tools:
 
 # remindkit — Apple Reminders 读写 CLI
 
-面向 agent 的 macOS Reminders 读写 CLI。所有命令输出 JSON/纯文本/统计三种格式，无需 Full Disk Access，只需 Reminders 权限。读端覆盖全部字段（含分区/子任务/分组/智能列表）；写端覆盖完整层级：分组 → 列表 → 分区 → 任务 → 子任务。
+面向 agent 的 macOS Reminders 读写 CLI。所有命令输出 JSON/纯文本/统计三种格式，无需 macOS「完全磁盘访问」（Full Disk Access），只需 Reminders 权限；但 agent 可能需要「完全访问」（Full Access）执行模式，才能触发授权。这两种权限不同。读端覆盖全部字段（含分区/子任务/分组/智能列表）；写端覆盖完整层级：分组 → 列表 → 分区 → 任务 → 子任务。
 
 ## 当前时间（不要猜，用这些值）
 
@@ -110,7 +110,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - **列表不存在**：`--list`/`--list-id`/`--to-id`/`--group-id` 匹配不到时退出码 1，stderr：`{"error":{"code":"noSuchList","message":"…"}}`（有近似候选时 message 附带 Did you mean 提示）。写侧业务码：noSuchList / noSuchReminder / noSuchGroup / noSuchAccount / noSuchDeletedRecord / noSuchSection / reminderKitError / unsupportedByEventKit / readOnly。
 - macOS 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制。
 - **新宿主首次使用（access: notDetermined）**：默认数据路径（ReminderKit 子进程）**从不触发授权弹窗**，未授权时静默返回空数据——普通查询命令永远不会弹窗。必须显式 `remindkit authorize`（或 `doctor --authorize`）调用 EventKit 授权路径触发系统弹窗；agent 用 `remindkit authorize --check --json` 非交互查状态，`--verify` 授权后验证主路径可读。
-- **受沙盒 agent 宿主**：若状态仍是 `notDetermined`，但显式 `authorize` 返回 `Mach error 4099`，说明 EventKit 的 XPC 连接在抵达 TCC 前已被执行沙盒阻断；这不是用户拒绝，**不要**重置 TCC。改在可访问 macOS GUI/TCC 的非沙盒宿主会话中运行 `remindkit authorize --verify`，随后同一会话中的所有 remindkit 读写也走该上下文。Terminal 的授权仅归 Terminal，不能替代 agent 宿主的授权。
+- **受沙盒 agent 宿主**：若状态仍是 `notDetermined`，但显式 `authorize` 返回 `Mach error 4099`，说明 EventKit 的 XPC 连接在抵达 TCC 前已被执行沙盒阻断；这不是用户拒绝，**不要**重置 TCC。将 agent 切换为「完全访问」（Full Access）执行模式后，于同一会话运行 `remindkit authorize --verify`；这里的「完全访问」不是 macOS「完全磁盘访问」。若该 agent 无此模式，则改在可访问 macOS GUI/TCC 的非沙盒宿主会话中授权。Terminal 的授权仅归 Terminal，不能替代 agent 宿主的授权。
 - 权限问题先跑 `remindkit doctor --for-agent --json`，按 `fix` 提示操作；**仅当状态为 `denied`** 时才先 `tccutil reset Reminders` 再 `authorize`（系统设置对无 GUI 宿主无效）。
 - 若 `doctor` 显示 `access: granted` 但命令仍失败，检查是否有 `--format`/参数拼写问题。
 - **写操作预检**：add/update 等写命令在权限未授权时直接报 `accessDenied`（不自动弹窗），按提示运行 `remindkit authorize`。
@@ -354,7 +354,7 @@ remindkit add "整理数据" --list "工作" --parent <父任务ID>
 remindkit authorize --check --json     # 非交互查状态（granted/notDetermined/denied/restricted）
 remindkit authorize                    # 触发授权弹窗（唯一有效路径；新宿主首次必做）
 remindkit doctor --for-agent --json    # 权限+责任进程+子进程二进制+修复指引
-# notDetermined + Mach error 4099：当前 agent 命令在沙盒中，改由非沙盒 GUI 宿主会话运行 authorize --verify；不要 reset TCC
+# notDetermined + Mach error 4099：EventKit 被受限执行环境阻断；将 agent 切换到「完全访问」（Full Access）后运行 authorize --verify（不是 macOS「完全磁盘访问」）；不要 reset TCC
 # denied 时先重置再授权（系统设置对无 GUI 宿主无效）：
 #   tccutil reset Reminders && remindkit authorize
 ```

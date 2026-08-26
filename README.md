@@ -14,6 +14,7 @@ remindkit 是一个 macOS 命令行工具，从 Apple Reminders（提醒事项�
 > **🔒 隐私**
 > - 所有数据**仅在本机处理**：CLI 不发起任何网络请求，不上传提醒内容（账单/健康/位置等敏感信息始终留在本机）。
 > - 需要授予「提醒事项」访问权限（TCC）；首次运行按系统提示授权即可，权限归属于宿主进程。
+> - 不需要 macOS「完全磁盘访问」。若 agent 的受限执行模式授权时报 `Mach error 4099`，请切换到 agent「完全访问」（Full Access）模式后重试；两者不是同一权限。
 
 ## 完整层级：列表文件夹 → 列表 → 分区 → 任务 → 子任务
 
@@ -55,7 +56,7 @@ remindkit authorize --verify            # ② 首次授权：触发系统授权�
 remindkit dump > ~/reminders-backup.json   # ③ 先做全量基线备份
 ```
 
-> 权限归属于宿主进程(终端/agent 宿主)。受沙盒限制的 agent 命令若在 `notDetermined` 状态执行 `authorize` 时返回 `Mach error 4099`，需改由可访问 macOS GUI/TCC 的非沙盒宿主会话完成授权；Terminal 的授权不适用于其他 agent 宿主。之后进行写操作(完成/删除/移动/批量)前,可随时再 dump 对照,心里有底。
+> 权限归属于宿主进程(终端/agent 宿主)。若 agent 在受限执行模式下，`authorize` 于 `notDetermined` 状态返回 `Mach error 4099`，请切换到 agent「完全访问」（Full Access）模式后重试 `remindkit authorize --verify`；这不是 macOS「完全磁盘访问」。若该 agent 无此模式，则需改由可访问 macOS GUI/TCC 的非沙盒宿主会话授权；Terminal 的授权不适用于其他 agent 宿主。之后进行写操作(完成/删除/移动/批量)前,可随时再 dump 对照,心里有底。
 
 ## 快速开始
 
