@@ -5,9 +5,11 @@ name: release
 # repo 守卫：仅在 remindkit-cli 仓库执行。
 #
 # 需要的 secret：
-#   RELEASE_TOKEN — 用于推送 homebrew-tap（跨仓库，GITHUB_TOKEN 无权）。
-#     Fine-grained PAT：仓库访问选 hiauhong/homebrew-tap（Contents: read+write），
-#     或 classic PAT 带 `repo` scope。未配置时 tap 更新步骤跳过（Release 照常发布）。
+#   TAP_DEPLOY_KEY — homebrew-tap 仓库的 **write deploy key** 私钥（SSH），
+#     用于跨仓库推送公式。deploy key 默认不过期，避免 PAT 静默失效
+#     （2026-09-11：旧 RELEASE_TOKEN PAT 失效导致 tap 未更新）。
+#     设置：gh secret set TAP_DEPLOY_KEY --repo hiauhong/remindkit-cli < <私钥文件>
+#     未配置时 tap 更新步骤跳过并告警（Release 照常发布）。
 
 on:
   push:
@@ -44,10 +46,10 @@ jobs:
 
       - name: Update homebrew-tap formula
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
         run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "::warning::RELEASE_TOKEN secret not configured — skipping tap update (Release was published)."
+          if [[ -z "$TAP_DEPLOY_KEY" ]]; then
+            echo "::warning::TAP_DEPLOY_KEY secret not configured — skipping tap update (Release was published)."
             exit 0
           fi
           set -euo pipefail
@@ -56,7 +58,13 @@ jobs:
           SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
           VERSION="${GITHUB_REF_NAME#v}"
 
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/hiauhong/homebrew-tap.git" /tmp/homebrew-tap
+          # Write deploy key on homebrew-tap (never expires, unlike a PAT).
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$HOME/.ssh/tap_deploy_key"
+          chmod 600 "$HOME/.ssh/tap_deploy_key"
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/tap_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+          git clone --quiet git@github.com:hiauhong/homebrew-tap.git /tmp/homebrew-tap
           cd /tmp/homebrew-tap
           sed -i '' \
             -e "s/^  version \"[^\"]*\"/  version \"$VERSION\"/" \
@@ -66,5 +74,11 @@ jobs:
           git config user.name "remindkit release bot"
           git config user.email "bot@users.noreply.github.com"
           git add Formula/remindkit.rb
-          git commit -m "remindkit $GITHUB_REF_NAME"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/hiauhong/homebrew-tap.git" main
+          # Idempotent: a re-run (or a manually pre-fixed formula) has nothing to
+          # commit — exit 0 with a notice instead of failing the job.
+          if ! git diff --cached --quiet; then
+            git commit -m "remindkit $GITHUB_REF_NAME"
+            git push origin main
+          else
+            echo "tap already at $GITHUB_REF_NAME — nothing to push"
+          fi
