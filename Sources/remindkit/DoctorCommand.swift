@@ -74,6 +74,8 @@ struct Doctor: ParsableCommand {
             return "Reminders access denied for '\(host)'. Reset TCC and retry: tccutil reset Reminders && remindkit authorize (System Settings cannot grant access to a headless host)."
         case .restricted:
             return "Reminders access is restricted by policy (e.g. MDM)."
+        case .writeOnly:
+            return "Reminders access is write-only for '\(host)' — remindkit needs full access to read. Run 'remindkit authorize' to request full access."
         }
     }
 }

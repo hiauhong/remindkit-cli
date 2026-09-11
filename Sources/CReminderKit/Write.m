@@ -1420,6 +1420,149 @@ static NSDictionary *opDeleteSection(id store, NSDictionary *req) {
              @"listID": extractUUID([list valueForKey:@"objectID"]) ?: @""};
 }
 
+/// Display name of a section object: smart-list sections expose `displayName`
+/// via KVC; regular list sections only via the parseSectionNames storage hack.
+static NSString *sectionDisplayName(id secObj) {
+    NSString *dn = nil;
+    @try { dn = [secObj valueForKey:@"displayName"]; } @catch (NSException *e) {}
+    if ([dn isKindOfClass:[NSString class]] && dn.length > 0) return dn;
+    NSArray *names = parseSectionNames(secObj);
+    return names.count > 0 ? names[0] : nil;
+}
+
+/// Reorder a section within a list or smart list. req: {op:reorderSection,
+/// listID?/listName, section, before?/after?/first?/last?, smartList?, author}.
+///
+/// Section order is independent of reminder order: it lives on the list's
+/// `sectionsContextChangeItem` as `unsavedSectionIDsOrdering` (an ordered array
+/// of section REMObjectIDs) plus the `shouldUpdateSectionsOrdering` gate.
+/// Both regular (REMListSectionContextChangeItem) and smart-list
+/// (REMSmartListSectionContextChangeItem) contexts expose it (verified 2026 on
+/// a smoke list: 甲/乙/丙 → 丙/甲/乙 persisted).
+static NSDictionary *opReorderSection(id store, NSDictionary *req) {
+    NSString *sectionName = req[@"section"];
+    if (![sectionName isKindOfClass:[NSString class]] || sectionName.length == 0) {
+        return @{@"ok": @NO, @"error": @"分区名不能为空"};
+    }
+    NSString *before = req[@"before"];
+    NSString *after = req[@"after"];
+    BOOL first = [req[@"first"] boolValue];
+    BOOL last = [req[@"last"] boolValue];
+    int mode = (before.length > 0) + (after.length > 0) + first + last;
+    if (mode != 1) {
+        return @{@"ok": @NO, @"error": @"reorder-section 需要且仅需一个定位参数：--before <分区> / --after <分区> / --first / --last"};
+    }
+
+    BOOL smart = [req[@"smartList"] boolValue];
+    NSString *kind = smart ? @"智能列表" : @"列表";
+    NSError *err = nil;
+    id saveReq = makeSaveRequest(store, req[@"author"]);
+    id container = nil;
+    id ctx = nil;
+    id secs = nil;
+
+    if (smart) {
+        NSDictionary *slErr = nil;
+        container = resolveSmartList(store, req[@"listID"], req[@"listName"], &slErr);
+        if (!container) return slErr;
+        id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), container);
+        ctx = [slCI valueForKey:@"sectionsContextChangeItem"];
+        if (!ctx) return @{@"ok": @NO, @"error": @"智能列表不支持分区"};
+        // Fetch reads from the smart list's model-level sectionContext (the
+        // change item's sectionsContextChangeItem answers `smartList` with an
+        // unrecognized selector); ordering is still written on the change item.
+        id secCtx = [container valueForKey:@"sectionContext"];
+        if (!secCtx) return @{@"ok": @NO, @"error": @"智能列表不支持分区"};
+        secs = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
+            NSSelectorFromString(@"fetchSmartListSectionsForSmartListSectionContext:error:"), secCtx, &err);
+    } else {
+        NSDictionary *listErr = nil;
+        container = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
+        if (!container) return listErr;
+        id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), container);
+        ctx = [listCI valueForKey:@"sectionsContextChangeItem"];
+        if (!ctx) return @{@"ok": @NO, @"error": @"列表不支持分区"};
+        secs = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
+            NSSelectorFromString(@"fetchListSectionsForListSectionContextChangeItem:error:"), ctx, &err);
+    }
+    if (![secs respondsToSelector:@selector(count)]) return @{@"ok": @NO, @"error": @"获取分区失败"};
+    NSInteger count = ((NSInteger(*)(id, SEL))objc_msgSend)(secs, @selector(count));
+    NSString *containerName = [container valueForKey:@"name"] ?: @"";
+    if (count == 0) {
+        return @{@"ok": @NO, @"code": @"noSuchSection", @"error": [NSString stringWithFormat:
+            @"%@「%@」没有分区（先用 add-section 创建）", kind, containerName]};
+    }
+
+    NSMutableArray *objs = [NSMutableArray array];
+    NSInteger targetIdx = NSNotFound;
+    NSInteger anchorIdx = NSNotFound;
+    NSString *anchorName = before.length > 0 ? before : after;
+    for (NSInteger i = 0; i < count; i++) {
+        id secObj = ((id(*)(id, SEL, NSInteger))objc_msgSend)(secs, @selector(objectAtIndex:), i);
+        NSString *n = sectionDisplayName(secObj) ?: @"";
+        [objs addObject:secObj];
+        if ([n isEqualToString:sectionName]) targetIdx = i;
+        if (anchorName.length > 0 && [n isEqualToString:anchorName]) anchorIdx = i;
+    }
+    if (targetIdx == NSNotFound) {
+        return @{@"ok": @NO, @"code": @"noSuchSection", @"error": [NSString stringWithFormat:
+            @"%@「%@」中没有分区「%@」", kind, containerName, sectionName]};
+    }
+    if (anchorName.length > 0 && anchorIdx == NSNotFound) {
+        return @{@"ok": @NO, @"code": @"noSuchSection", @"error": [NSString stringWithFormat:
+            @"%@「%@」中没有分区「%@」（--before/--after 的锚点）", kind, containerName, anchorName]};
+    }
+    if (anchorIdx == targetIdx) {
+        return @{@"ok": @YES, @"section": sectionName, @"listName": containerName,
+                 @"unchanged": @YES};
+    }
+
+    // Destination index computed against the array with the target removed.
+    id targetObj = objs[targetIdx];
+    id anchorObj = anchorIdx != NSNotFound ? objs[anchorIdx] : nil;
+    NSMutableArray *order = [NSMutableArray arrayWithArray:objs];
+    [order removeObjectAtIndex:targetIdx];
+    NSUInteger dest;
+    if (first) {
+        dest = 0;
+    } else if (last) {
+        dest = order.count;
+    } else {
+        NSUInteger ai = [order indexOfObjectIdenticalTo:anchorObj];
+        if (ai == NSNotFound) return @{@"ok": @NO, @"error": @"无法定位锚点分区"};
+        dest = before.length > 0 ? ai : ai + 1;
+    }
+    if (dest > order.count) dest = order.count;
+    [order insertObject:targetObj atIndex:dest];
+
+    NSMutableArray *orderingIDs = [NSMutableArray arrayWithCapacity:order.count];
+    for (id s in order) {
+        id oid = [s valueForKey:@"objectID"];
+        if (oid) [orderingIDs addObject:oid];
+    }
+    @try {
+        ((void(*)(id, SEL, id))objc_msgSend)(ctx,
+            NSSelectorFromString(@"setUnsavedSectionIDsOrdering:"), orderingIDs);
+        ((void(*)(id, SEL, BOOL))objc_msgSend)(ctx,
+            NSSelectorFromString(@"setShouldUpdateSectionsOrdering:"), YES);
+    } @catch (NSException *e) {
+        return @{@"ok": @NO, @"error": e.reason ?: @"设置分区顺序异常"};
+    }
+    if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
+
+    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"ok": @YES, @"section": sectionName, @"listName": containerName,
+        @"order": @(dest)
+    }];
+    if (first) out[@"relation"] = @"first";
+    else if (last) out[@"relation"] = @"last";
+    else {
+        out[@"relation"] = before.length > 0 ? @"before" : @"after";
+        out[@"sibling"] = anchorName;
+    }
+    return out;
+}
+
 /// Create a custom smart list. req: {op:createSmartList, name, color?,
 /// displayName?, filterData?, groupID?/groupName?, author}. When a group is
 /// given, the smart list is created inside that group (folder) via
@@ -1775,6 +1918,7 @@ NSDictionary *executeWriteRequest(id store, NSDictionary *req) {
         if ([op isEqualToString:@"createList"]) return opCreateList(store, req);
         if ([op isEqualToString:@"addSection"]) return opAddSection(store, req);
         if ([op isEqualToString:@"deleteSection"]) return opDeleteSection(store, req);
+        if ([op isEqualToString:@"reorderSection"]) return opReorderSection(store, req);
         if ([op isEqualToString:@"createSmartList"]) return opCreateSmartList(store, req);
         if ([op isEqualToString:@"moveList"]) return opMoveList(store, req);
         return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"未知操作：%@", op]};

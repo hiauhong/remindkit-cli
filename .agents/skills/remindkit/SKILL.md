@@ -1,5 +1,6 @@
 ---
 name: remindkit
+skill-version: 0.3.5-dev
 description: Read and manage Apple Reminders on macOS — lists, today/overdue, search, stats, permission diagnosis, and full write (create/edit/complete/delete reminders; groups, sections, subtasks, smart lists). Use when the user wants to know what's due, check/search/count reminders, list lists, export JSON, diagnose permissions, or create/update/complete/delete reminders and organize lists, groups, sections, smart lists.
 allowed-tools:
   - Bash(remindkit *)
@@ -56,6 +57,7 @@ allowed-tools:
 | **新增提醒（先看结构再写）** | `remindkit list --brief` 定列表+分区 → `remindkit add "…" --list <标题或--list-id UUID> --section <分区>` | **add 响应自带 `listTitle`+`section` 回显，无需再验证 query**；重名列表用 `--list-id` 精确定位 |
 | 全量导出 | `remindkit dump > reminders.json` | 数据量大，谨慎；`dump.smartLists` 默认只含自定义（`type: custom`）；系统智能列表（今天/旗标/已完成/已分配）是虚拟视图、事项都在普通列表里，默认不输出，`dump --system-smartlists` 才包含；「计划」无实体，用 `scheduled` 命令 |
 | 调整列表内任务顺序 | `remindkit reorder <id> --before <同级ID>` / `--after` / `--first`（置顶） / `--last`（置底） | 相对移动，锚点须在同一列表；子任务不支持（v1） |
+| 调整列表内**分区**顺序 | `remindkit reorder-section <列表> <分区> --first` / `--last` / `--before <分区>` / `--after <分区>` | 分区顺序独立于任务顺序；`--smart-list` 用于智能列表分区；锚点须在同一列表 |
 | 权限诊断 | `remindkit doctor --for-agent --json` | 报错时最先跑 |
 
 ## 数据结构：五层层级模型（先建心智模型，再动手）
@@ -111,6 +113,13 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - macOS 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制。
 - **新宿主首次使用（access: notDetermined）**：默认数据路径（ReminderKit 子进程）**从不触发授权弹窗**，未授权时静默返回空数据——普通查询命令永远不会弹窗。必须显式 `remindkit authorize`（或 `doctor --authorize`）调用 EventKit 授权路径触发系统弹窗；agent 用 `remindkit authorize --check --json` 非交互查状态，`--verify` 授权后验证主路径可读。
 - **受沙盒 agent 宿主**：若状态仍是 `notDetermined`，但显式 `authorize` 返回 `Mach error 4099`，说明 EventKit 的 XPC 连接在抵达 TCC 前已被执行沙盒阻断；这不是用户拒绝，**不要**重置 TCC。将 agent 切换为「完全访问」（Full Access）执行模式后，于同一会话运行 `remindkit authorize --verify`；这里的「完全访问」不是 macOS「完全磁盘访问」。若该 agent 无此模式，则改在可访问 macOS GUI/TCC 的非沙盒宿主会话中授权。Terminal 的授权仅归 Terminal，不能替代 agent 宿主的授权。
+- **无 GUI 归属的 shell 宿主（如 agent 内嵌终端，`doctor` 显示 `host: zsh` 等）**：`authorize` 立即返回 `accessDenied` 且**不弹窗**（静默拒绝），重试或关沙箱都无用；系统设置手动添加也不生效。改用 `launchctl submit` 让命令以 launchd 宿主发起——launchd 有 GUI 会话归属，授权弹窗能正常出现（授权落在 `host: launchd`，持久有效直到 `tccutil reset`），授权后 ReminderKit 主路径同样可用：
+
+  ```bash
+  launchctl submit -l remindkit-auth -o /tmp/rk.out -e /tmp/rk.err \
+    -- /opt/homebrew/bin/remindkit authorize   # launchd 环境变量最小，二进制用绝对路径
+  # 用户在屏幕弹窗点「允许」→ launchctl remove remindkit-auth && remindkit doctor 复核
+  ```
 - 权限问题先跑 `remindkit doctor --for-agent --json`，按 `fix` 提示操作；**仅当状态为 `denied`** 时才先 `tccutil reset Reminders` 再 `authorize`（系统设置对无 GUI 宿主无效）。
 - 若 `doctor` 显示 `access: granted` 但命令仍失败，检查是否有 `--format`/参数拼写问题。
 - **写操作预检**：add/update 等写命令在权限未授权时直接报 `accessDenied`（不自动弹窗），按提示运行 `remindkit authorize`。
@@ -180,7 +189,7 @@ remindkit doctor --authorize           # doctor 第二入口，同 authorize
 
 ## 写操作（谨慎使用）
 
-> **只读保护**：环境变量 `REMINDKIT_READ_ONLY=1` 时所有写命令（add/update/complete/delete/move/reorder/bulk/add-list/add-group/add-section/add-smartlist/delete-list/update-list/restore）拒绝执行，报 `{"error":{"code":"readOnly"}}`——agent 在只读场景（如纯查询会话）可设置它防误写。
+> **只读保护**：环境变量 `REMINDKIT_READ_ONLY=1` 时所有写命令（add/update/complete/delete/move/reorder/reorder-section/bulk/add-list/add-group/add-section/delete-section/add-smartlist/delete-list/update-list/restore）拒绝执行，报 `{"error":{"code":"readOnly"}}`——agent 在只读场景（如纯查询会话）可设置它防误写。
 > **测试纪律（硬规则）**：写操作测试只能在**新建**的「测试冒烟*」列表/分组上做，自建自删（`make test` 的冒烟脚本会自建并自动删除，最后校验零残留）。**绝不直接对真实列表执行写测试**。
 > **同名列表**：按名字操作遇到重名（如两个「工作」）会报歧义错误并列出候选 ID——此时必须改用 `--id`/`--list-id`/`--to-id` 精确定位。
 
@@ -238,6 +247,10 @@ remindkit reorder <id> --first          # 移到列表顶部
 remindkit reorder <id> --last           # 移到列表底部
 remindkit reorder <id> --before <同级提醒ID>   # 移到某提醒前面（锚点须同一列表）
 remindkit reorder <id> --after <同级提醒ID>    # 移到某提醒后面（锚点须同一列表）
+remindkit reorder-section "想买" 日用品 --first      # 分区置顶（分区顺序独立于任务顺序）
+remindkit reorder-section "想买" 日用品 --last       # 分区置底
+remindkit reorder-section "想买" 鞋 --after 衣服     # 移到某分区之后（锚点须同一列表）
+remindkit reorder-section "日用品" 厨卫 --first --smart-list   # 智能列表分区排序（--smart-list 标记）
 remindkit recently-deleted     # 查询最近删除（remindkit 删的，仍可恢复的）
 remindkit restore <id>         # 从最近删除恢复到原列表（ID 不变）
 
@@ -260,6 +273,7 @@ remindkit add-list "项目A" --group "工作"    # 在分组内建列表（--gro
 remindkit add-section "项目A" "待办"            # 给列表加分区
 remindkit add "写周报" --list "项目A" --section "待办"   # 新建提醒时直接归入分区
 remindkit update <id> --section "进行中"         # 把已有提醒移入另一分区（先 add-section 创建）
+remindkit reorder-section "项目A" "进行中" --first   # 调整分区显示顺序（--before/--after/--last）
 
 # 智能列表（虚拟视图，任务必须物理存在于普通列表；2026-08-16）
 remindkit add-smartlist "日用品" --tag 日用品采购 --color "#FF3B30" --group 收入支出  # 建智能列表 + hashtag 过滤 + 放入分组（--group 按名/UUID）
@@ -357,4 +371,8 @@ remindkit doctor --for-agent --json    # 权限+责任进程+子进程二进制+
 # notDetermined + Mach error 4099：EventKit 被受限执行环境阻断；将 agent 切换到「完全访问」（Full Access）后运行 authorize --verify（不是 macOS「完全磁盘访问」）；不要 reset TCC
 # denied 时先重置再授权（系统设置对无 GUI 宿主无效）：
 #   tccutil reset Reminders && remindkit authorize
+# 无 GUI 归属宿主（agent 内嵌 shell，host: zsh 等）静默拒绝、不弹窗：改由 launchd 宿主发起
+#   launchctl submit -l remindkit-auth -o /tmp/rk.out -e /tmp/rk.err -- /opt/homebrew/bin/remindkit authorize
+#   # 弹窗点「允许」后 launchctl remove remindkit-auth；grant 归 host: launchd，持久有效
+# 注意：tccutil reset 会清掉所有宿主（含 launchd / Terminal）的授权，各宿主需逐一重新触发弹窗
 ```

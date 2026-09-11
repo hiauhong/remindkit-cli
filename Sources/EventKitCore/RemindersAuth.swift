@@ -63,6 +63,11 @@ public enum RemindersAuth {
         switch status {
         case .authorized, .fullAccess:
             return .granted
+        case .writeOnly:
+            // macOS 14+ / SDK 27 known case: write-only Reminders access cannot
+            // back a read pipeline, so it is NOT "granted" — surface it so
+            // `authorize` can request full access.
+            return .writeOnly
         case .denied:
             return .denied
         case .restricted:
@@ -80,6 +85,7 @@ public enum RemindersAccessState: String {
     case denied
     case restricted
     case notDetermined
+    case writeOnly
 }
 
 /// Best-effort name of the responsible (host) process that launched us.

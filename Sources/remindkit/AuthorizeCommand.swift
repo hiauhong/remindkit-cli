@@ -45,6 +45,17 @@ func runAuthorize(check: Bool, verify: Bool, json: Bool) throws {
             """
         emitAuthorizeState(access: access, host: host, message: message, verify: nil, json: json)
 
+    case .writeOnly:
+        // Write-only access (macOS 14+) cannot back the read pipeline.
+        // requestFullAccessToReminders upgrades it to full access.
+        _ = RemindersAuth.requestAccessSync()
+        let after = RemindersAuth.checkAccessState()
+        var verifyStatus: String?
+        if verify, after == .granted { verifyStatus = verifyPrimaryPath() }
+        emitAuthorizeState(access: after, host: host,
+                           message: after == .granted ? "Full access granted (upgraded from write-only)" : nil,
+                           verify: verifyStatus, json: json)
+
     case .restricted:
         emitAuthorizeState(access: access, host: host,
                            message: "Reminders access is restricted by policy (e.g. MDM).",

@@ -1439,6 +1439,70 @@ struct DeleteSection: ParsableCommand {
     }
 }
 
+// MARK: - reorder-section
+
+struct ReorderSection: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "reorder-section",
+        abstract: "Reorder a section within a list or smart list — move before/after another section, or to the top/bottom"
+    )
+
+    @Argument(help: "List name or ID")
+    var list: String
+
+    @Argument(help: "Section name to move")
+    var section: String
+
+    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
+    @Option(name: .long, help: "Move before this section (anchor must exist in the same list)")
+    var before: String?
+
+    @Option(name: .long, help: "Move after this section (anchor must exist in the same list)")
+    var after: String?
+
+    @Flag(name: .long, help: "Move to the top of the section list")
+    var first: Bool = false
+
+    @Flag(name: .long, help: "Move to the bottom of the section list")
+    var last: Bool = false
+
+    @Flag(name: .long, help: "Target is a smart list (virtual view) instead of a regular list")
+    var smartList: Bool = false
+
+    func validate() throws {
+        let modes = (before != nil ? 1 : 0) + (after != nil ? 1 : 0) + (first ? 1 : 0) + (last ? 1 : 0)
+        guard modes == 1 else {
+            throw ValidationError("需要且仅需一个定位参数：--before <分区> / --after <分区> / --first / --last")
+        }
+        if let before, before == section {
+            throw ValidationError("--before 不能引用分区自身（顺序不会变）")
+        }
+        if let after, after == section {
+            throw ValidationError("--after 不能引用分区自身（顺序不会变）")
+        }
+    }
+
+    func run() throws {
+        guardWriteEnabled()
+        var request: [String: Any] = ["op": "reorderSection", "section": section, "author": "remindkit"]
+        if smartList { request["smartList"] = true }
+        if let listId { request["listID"] = listId } else { request["listName"] = list }
+        if let before { request["before"] = before }
+        if let after { request["after"] = after }
+        if first { request["first"] = true }
+        if last { request["last"] = true }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            fail("unsupportedByEventKit", "分区排序需要 ReminderKit 子进程（EventKit 不支持分区）")
+        }
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
 // MARK: - add-smartlist
 
 struct AddSmartList: ParsableCommand {

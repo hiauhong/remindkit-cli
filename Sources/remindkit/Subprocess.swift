@@ -46,6 +46,9 @@ func guardRemindersAccess() {
     case .restricted:
         fail("accessDenied",
              "Apple Reminders 权限受策略限制（如 MDM）。")
+    case .writeOnly:
+        fail("accessDenied",
+             "Apple Reminders 仅有「只写」权限（host: \(responsibleProcessName())），读操作不可用。运行 'remindkit authorize' 请求完整权限。")
     }
 }
 

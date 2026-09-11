@@ -682,6 +682,55 @@ import json,sys
 rs=[r for r in json.load(sys.stdin) if r['id']=='$BULKREM']
 print('ok' if len(rs)==1 and rs[0].get('section')=='$SEC_NAME' else 'bad')")"
 
+# ── reorder-section（分区显示顺序，独立于任务 order）──────────────────────
+# 自建列表 + 3 个分区，逐条验证 --first/--after/--before/--last 与错误路径；
+# 顺带覆盖 --smart-list 写路径（智能列表分区顺序 CLI 不渲染，只断言 ok）。
+RS_LIST="测试冒烟分区排序$TAG"
+RS_LIST_ID=$("$BIN" add-list "$RS_LIST" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$RS_LIST_ID"
+for s in 冒烟甲 冒烟乙 冒烟丙; do "$BIN" add-section "$RS_LIST_ID" "$s" >/dev/null 2>&1; done
+sections_of() {
+    "$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$RS_LIST_ID': print(','.join(c.get('sections') or []))
+"
+}
+wait_sections() {  # remindd 回读偶尔滞后：轮询到期望顺序（最多 ~3s）
+    local want="$1" got=""
+    for _ in 1 2 3 4 5 6; do
+        got="$(sections_of)"
+        [[ "$got" == "$want" ]] && break
+        sleep 0.5
+    done
+    echo "$got"
+}
+check "reorder-section: setup 3 sections" "冒烟甲,冒烟乙,冒烟丙" "$(wait_sections 冒烟甲,冒烟乙,冒烟丙)"
+check "reorder-section --first moves section to top" "冒烟丙,冒烟甲,冒烟乙" \
+    "$("$BIN" reorder-section "$RS_LIST_ID" 冒烟丙 --first >/dev/null 2>&1; wait_sections 冒烟丙,冒烟甲,冒烟乙)"
+check "reorder-section --after moves after anchor" "冒烟丙,冒烟乙,冒烟甲" \
+    "$("$BIN" reorder-section "$RS_LIST_ID" 冒烟乙 --after 冒烟丙 >/dev/null 2>&1; wait_sections 冒烟丙,冒烟乙,冒烟甲)"
+check "reorder-section --before moves before anchor" "冒烟丙,冒烟甲,冒烟乙" \
+    "$("$BIN" reorder-section "$RS_LIST_ID" 冒烟甲 --before 冒烟乙 >/dev/null 2>&1; wait_sections 冒烟丙,冒烟甲,冒烟乙)"
+check "reorder-section --last moves section to bottom" "冒烟甲,冒烟乙,冒烟丙" \
+    "$("$BIN" reorder-section "$RS_LIST_ID" 冒烟丙 --last >/dev/null 2>&1; wait_sections 冒烟甲,冒烟乙,冒烟丙)"
+RS_ERR=$("$BIN" reorder-section "$RS_LIST_ID" 不存在 --first 2>&1 || true)
+check "reorder-section missing section reports noSuchSection" "ok" "$(echo "$RS_ERR" | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='noSuchSection' else 'bad')")"
+RS_ERR=$("$BIN" reorder-section "$RS_LIST_ID" 冒烟甲 --after 不存在 2>&1 || true)
+check "reorder-section missing anchor reports noSuchSection" "ok" "$(echo "$RS_ERR" | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='noSuchSection' else 'bad')")"
+RS_ERR=$("$BIN" reorder-section "$RS_LIST_ID" 冒烟甲 2>&1 || true)
+check "reorder-section requires exactly one position flag" "ok" "$(echo "$RS_ERR" | grep -q '需要且仅需一个定位参数' && echo ok || echo bad)"
+
+RS_SL="测试冒烟分区排序智能$TAG"
+RS_SL_ID=$("$BIN" add-smartlist "$RS_SL" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))")
+register_entity_id "$RS_SL_ID"
+"$BIN" add-section "$RS_SL_ID" 冒烟甲 --smart-list >/dev/null 2>&1
+"$BIN" add-section "$RS_SL_ID" 冒烟乙 --smart-list >/dev/null 2>&1
+check "reorder-section --smart-list returns ok" "ok" "$("$BIN" reorder-section "$RS_SL_ID" 冒烟乙 --first --smart-list | python3 -c "
+import json,sys; d=json.load(sys.stdin); print('ok' if d.get('ok') else 'bad:'+json.dumps(d))")"
+
 # ── Final hygiene: nothing we created may remain ────────────────────────────
 # cleanup runs explicitly here (and again via trap on exit; it is idempotent).
 cleanup
