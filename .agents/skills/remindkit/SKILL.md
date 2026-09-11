@@ -85,6 +85,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 
 ## 统一语义
 
+- **版本自检**：`remindkit --version` 输出当前版本（取自内置 skill 的 `skill-version:` 戳，与 `brew list --versions remindkit` 一致）——agent 排查「命令不存在/行为不一致」时先比对版本，避免照新版文档调旧二进制。
 - 所有查询命令**默认只返回未完成**；`--completed` 只查已完成；`--all` 查全部（`--completed` 与 `--all` 互斥）。
 - **JSON 日期字段**：`dueDate` 是 epoch（Double），同时输出 `dueDateText`（本地时区 `yyyy-MM-dd HH:mm`，全天提醒为 `00:00`）——判断今天/过期/几天内直接用 `dueDateText`，勿手转 epoch。
 - **分区（section）字段**：查询命令**显式 `--list` 时自动带** `section`（列表结构查询的核心诉求，如「OKR 列表 → 健康/个人成长/财务…」）；无 `--list` 默认不带（性能，section 查询慢）。需要时 `--sections` 强制带 / `--no-sections` 强制跳过；`--section`/`--tree` 与 `--no-sections` 互斥。

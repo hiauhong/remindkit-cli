@@ -44,6 +44,34 @@ jobs:
           # improvements, not a full commit changelog. No --generate-notes.
           gh release create "$GITHUB_REF_NAME" "$TARBALL"
 
+      - name: Build and upload Homebrew bottle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCH="$(uname -m)"
+          WORK="$(mktemp -d)"
+          tar -xzf "dist/remindkit-darwin-${ARCH}.tar.gz" -C "$WORK"
+          # Bottle payload = an installed keg: <name>/<version>/{bin,share}.
+          # It must be built from the *packaged* tarball so the bundled SKILL.md
+          # carries the release version stamp.
+          #
+          # Tagged `all` on purpose: this formula copies prebuilt binaries and
+          # compiles nothing, but without a matching bottle Homebrew classifies
+          # the install as a source build and runs fatal_build_from_source_checks
+          # — which hard-fails unless an Xcode matching the running macOS major
+          # is installed (e.g. macOS 27 + Xcode 26). An `all` bottle matches
+          # every platform tag, so brew pours and skips those checks.
+          KEG="$WORK/keg/remindkit/${VERSION}"
+          mkdir -p "$KEG/bin" "$KEG/share/remindkit/skills"
+          cp "$WORK/bin/remindkit" "$WORK/bin/fetch-remindkit" "$KEG/bin/"
+          cp -R "$WORK/bin/.agents/skills/remindkit" "$KEG/share/remindkit/skills/remindkit"
+          # brew expects this exact asset name for an `all` bottle (single dash).
+          tar -czf "dist/remindkit-${VERSION}.all.bottle.tar.gz" -C "$WORK/keg" remindkit
+          gh release upload "$GITHUB_REF_NAME" "dist/remindkit-${VERSION}.all.bottle.tar.gz" --clobber
+          echo "bottle uploaded: remindkit-${VERSION}.all.bottle.tar.gz"
+
       - name: Update homebrew-tap formula
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
@@ -57,6 +85,8 @@ jobs:
           TARBALL="dist/remindkit-darwin-${ARCH}.tar.gz"
           SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
           VERSION="${GITHUB_REF_NAME#v}"
+          BOTTLE="dist/remindkit-${VERSION}.all.bottle.tar.gz"
+          BOTTLE_SHA="$(shasum -a 256 "$BOTTLE" | awk '{print $1}')"
 
           # Write deploy key on homebrew-tap (never expires, unlike a PAT).
           mkdir -p "$HOME/.ssh"
@@ -70,7 +100,12 @@ jobs:
             -e "s/^  version \"[^\"]*\"/  version \"$VERSION\"/" \
             -e "s|/download/v[0-9][0-9.]*/|/download/$GITHUB_REF_NAME/|" \
             -e "s/    sha256 \"[^\"]*\"/    sha256 \"$SHA\"/" \
+            -e "s|^    root_url \".*\"|    root_url \"https://github.com/hiauhong/remindkit-cli/releases/download/$GITHUB_REF_NAME\"|" \
+            -e "s|^    sha256 cellar: :any_skip_relocation, all: \"[^\"]*\"|    sha256 cellar: :any_skip_relocation, all: \"$BOTTLE_SHA\"|" \
             Formula/remindkit.rb
+          # 瓶必须与公式同步：漏更新 sha256 会让 brew 校验失败退回源码构建（又撞 Xcode 门槛）。
+          grep -q "all: \"$BOTTLE_SHA\"" Formula/remindkit.rb || { echo "::error::bottle sha256 not written to formula"; exit 1; }
+          grep -q "download/$GITHUB_REF_NAME\"" Formula/remindkit.rb || { echo "::error::bottle root_url not written to formula"; exit 1; }
           git config user.name "remindkit release bot"
           git config user.email "bot@users.noreply.github.com"
           git add Formula/remindkit.rb

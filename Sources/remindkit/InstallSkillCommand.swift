@@ -20,8 +20,8 @@ struct InstallSkill: ParsableCommand {
         let installClaude = claude || !agents
         let installAgents = agents || !claude
 
-        guard let sourceDir = findSkillSource() else {
-            throw ValidationError("Could not find skill directory relative to binary at \(CommandLine.arguments[0]). Searched: \(skillSourceCandidates().map(\.path).joined(separator: ", "))")
+        guard let sourceDir = SkillSource.find() else {
+            throw ValidationError("Could not find skill directory relative to binary at \(CommandLine.arguments[0]). Searched: \(SkillSource.candidates().map(\.path).joined(separator: ", "))")
         }
 
         let home = InstallSkill.effectiveHome
@@ -56,52 +56,6 @@ struct InstallSkill: ParsableCommand {
             return home
         }
         return NSHomeDirectory()
-    }
-
-    // MARK: - Skill discovery
-
-    /// 解析二进制真实路径。bash/脚本从 PATH 调用时 argv[0] 是裸命令名（如 `remindkit`），
-    /// 直接 `URL(fileURLWithPath:)` 会被解析成 cwd 相对路径，导致 binDir 错指到 cwd——
-    /// 候选源里 cwd/.agents/skills/remindkit 会撞上目标位置，--force 时先删后拷把自己删掉。
-    private func binaryURL() -> URL {
-        let argv0 = CommandLine.arguments[0]
-        if argv0.hasPrefix("/") {
-            return URL(fileURLWithPath: argv0)
-        }
-        let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"
-        for dir in pathEnv.split(separator: ":") {
-            let candidate = URL(fileURLWithPath: String(dir)).appendingPathComponent(argv0)
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return URL(fileURLWithPath: argv0)
-    }
-
-    private func findSkillSource() -> URL? {
-        for candidate in skillSourceCandidates()
-        where FileManager.default.fileExists(atPath: candidate.appendingPathComponent("SKILL.md").path) {
-            return candidate
-        }
-        return nil
-    }
-
-    private func skillSourceCandidates() -> [URL] {
-        // Resolve symlinks so a Homebrew-installed binary (/opt/homebrew/bin/remindkit
-        // → Cellar) resolves the share/remindkit/skills path relative to the real
-        // Cellar bin dir, not the /opt/homebrew/bin symlink location.
-        let binary = binaryURL().resolvingSymlinksInPath()
-        let binDir = binary.deletingLastPathComponent()
-        let fm = FileManager.default
-        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
-        return [
-            binDir.deletingLastPathComponent().appendingPathComponent(".agents/skills/remindkit"),
-            binDir.appendingPathComponent(".agents/skills/remindkit"),
-            binDir.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".agents/skills/remindkit"),
-            // Homebrew: formula installs the skill to share/remindkit/skills/remindkit
-            binDir.deletingLastPathComponent().appendingPathComponent("share/remindkit/skills/remindkit"),
-            cwd.appendingPathComponent(".agents/skills/remindkit"),
-        ]
     }
 
     // MARK: - Install
@@ -154,6 +108,11 @@ struct InstallSkill: ParsableCommand {
     struct SkillVersion: Comparable {
         let major: Int, minor: Int, patch: Int
         let prerelease: String?
+
+        /// 还原成 frontmatter 里的版本串（`+build` 元数据不参与比较，故不回显）。
+        var versionString: String {
+            prerelease.map { "\(major).\(minor).\(patch)-\($0)" } ?? "\(major).\(minor).\(patch)"
+        }
 
         static func parse(_ text: String) -> SkillVersion? {
             // 兼容 UTF-8 BOM 与 `---` 行的前导空白（不同编辑器/手工编辑可能产生）。
@@ -292,7 +251,7 @@ struct InstallSkill: ParsableCommand {
         let home = InstallSkill.effectiveHome
         let dest = URL(fileURLWithPath: home).appendingPathComponent(".agents/skills/remindkit")
         let cmd = InstallSkill()
-        guard let source = cmd.findSkillSource() else { return nil }
+        guard let source = SkillSource.find() else { return nil }
         return syncSkill(source: source, dest: dest, using: cmd)
     }
 }
