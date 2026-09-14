@@ -7,7 +7,7 @@
 remindkit is a macOS command-line tool that exports structured data from Apple Reminders and supports **the full hierarchy, read and write** — list folders → lists → sections → tasks → subtasks, all five levels. **Designed for AI agents**: unified JSON output, machine-parseable error contract, and a bundled agent skill.
 
 
-> 🎨 **Vibe coded project**: features, tests, and docs are produced in collaboration with an AI agent (vibe coding) and **have not been line-by-line reviewed — use with caution in production**.
+> 🤖 **Vibe coded project**: features, tests, and docs are produced in collaboration with an AI agent (vibe coding) and **have not been line-by-line reviewed — use with caution in production**.
 
 > **⚠️ Disclaimer** — reads Apple's **private framework** `ReminderKit.framework`; unsupported by Apple, may break with any macOS update; not affiliated with Apple Inc.; for personal use and study only.
 
