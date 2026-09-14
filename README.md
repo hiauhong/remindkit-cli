@@ -7,7 +7,7 @@
 remindkit 是一个 macOS 命令行工具，从 Apple Reminders（提醒事项）导出结构化数据，并支持**全层级读写**——从**列表文件夹 → 列表 → 分区 → 任务 → 子任务**，五层一路打通。**面向 AI agent 设计**：统一 JSON 输出、机器可解析的错误契约、内置 agent skill。
 
 
-> 🎨 本项目由 **vibe coding**(AI 辅助开发)驱动——功能、测试与文档均在 AI agent 协作下迭代产出。
+> 🎨 **Vibe coding 项目**：功能、测试与文档由 AI agent 协作产出（vibe coding），**未经人工逐行审查，请谨慎用于生产环境**。
 
 > **⚠️ 免责声明** — 通过苹果**私有框架** `ReminderKit.framework` 提取数据,不受苹果支持,可能随 macOS 更新失效;与 Apple Inc. 无任何关联,仅供个人使用与学习研究。
 
