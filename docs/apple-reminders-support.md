@@ -11,13 +11,13 @@
 
 | 苹果功能 | 状态 | 说明 |
 |---------|------|------|
-| 普通列表 | ✅ | 读（`list`）、建（`add-list`）、改名/图标/颜色（`update-list`）、删（`delete-list --yes`） |
+| 普通列表 | ✅ | 读（`list`）、建（`add-list`，**同名默认拒绝** `listExists`，`--allow-duplicate` 放开）、改名/图标/颜色（`update-list`）、删（`delete-list --yes`） |
 | 列表图标（emoji） | ✅ | 读取 + `update-list --icon` |
 | 列表颜色 | ✅ | 读取 + `update-list --color`（12 色板） |
-| 分组（智能文件夹） | ✅ | **读**完整（`list --groups`、parentUUID 归属）；**写**：`add-group` 建、`add-list --group` 放入、`update-list` 改名（统一派发）、`delete-list` 删（探索确认：分组=REMAccountGroupContext，无 REMGroup 类；苹果文件夹不支持嵌套，单层） |
-| 智能列表 | ✅ | **读**（smartLists 字段）；**写**：`add-smartlist [--color]`、`update-list` 改名、删除可用 `delete-list` |
+| 分组（智能文件夹） | ✅ | **读**完整（`list --groups`、parentUUID 归属）；**写**：`add-group` 建（同名默认拒绝 `groupExists`，`--allow-duplicate` 放开）、`add-list --group` 放入、`update-list` 改名（统一派发）、`delete-list` 删（探索确认：分组=REMAccountGroupContext，无 REMGroup 类；苹果文件夹不支持嵌套，单层） |
+| 智能列表 | ✅ | **读**（smartLists 字段）；**写**：`add-smartlist [--color]`（同名自定义智能列表默认拒绝 `smartListExists`，`--allow-duplicate` 放开；与普通列表同名仍允许）、`update-list` 改名、删除可用 `delete-list` |
 | 日常采购列表（Grocery） | ❌ | 苹果 App 的「日常采购」列表（自动按类别分组商品：农产品/奶制品/烘焙等）依赖 ReminderKit 分类字段，**读不到分类分组、也建不了该类型列表**；只能当普通列表读（标题/商品仍可见，无类别分组） |
-| 列表分区（sections） | ✅ | **读**（`[N sections]`）；**写**：`add-section <list> <name>` 建分区；`add --section` / `update --section` 把提醒归入分区（REMMembership 路径）；**分区排序**：`reorder-section <list> <section> --first/--last/--before/--after`（`--smart-list` 支持智能列表分区） |
+| 列表分区（sections） | ✅ | **读**（`[N sections]`；`list --format json` 的 `sectionDetails` 带分区 id）；**写**：`add-section <list> <name>` 建分区（**幂等**：同名已存在返回 `existed:true`，要建重复须 `--allow-duplicate`）；`delete-section <list> [<name>] [--section-id <uuid>]` 删分区（同名多份报 `ambiguousSection`，只能按 id 删）；`add --section` / `update --section` 把提醒归入分区（REMMembership 路径，同名多份同样报 `ambiguousSection`）；**分区排序**：`reorder-section <list> <section> --first/--last/--before/--after`（`--smart-list` 支持智能列表分区） |
 | 列表排序（侧边栏顺序） | ✅ | `move-list <list> --order N`（普通列表/分组/智能列表统一走 `listIDsOrdering`，索引取自 `dump listIDsOrdering`）；读按 `listIDsOrdering` 渲染，与 App 侧边栏一致 |
 
 ## 二、提醒字段层

@@ -41,6 +41,9 @@ NSArray *fetchLists(id store, id groups) {
 
         // sections
         NSMutableArray *sections = [NSMutableArray array];
+        // 与 sections 并行的一份带 id 的明细：Apple 允许同名分区，写操作
+        // （delete-section --section-id）只能靠 id 精确寻址。
+        NSMutableArray *sectionDetails = [NSMutableArray array];
         @try {
             id lsdv = [[NSClassFromString(@"REMListSectionsDataView") alloc] initWithStore:store];
             if (lsdv) {
@@ -53,7 +56,15 @@ NSArray *fetchLists(id store, id groups) {
                     for (NSInteger i = 0; i < count; i++) {
                         id secObj = ((id(*)(id, SEL, NSInteger))objc_msgSend)(secs, @selector(objectAtIndex:), i);
                         NSArray *names = parseSectionNames(secObj);
-                        if (names.count > 0) [sections addObjectsFromArray:names];
+                        if (names.count > 0) {
+                            [sections addObjectsFromArray:names];
+                            NSString *sid = extractUUID([secObj valueForKey:@"objectID"]);
+                            if (sid.length > 0) {
+                                for (NSString *n in names) {
+                                    [sectionDetails addObject:@{@"id": sid, @"name": n}];
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -70,6 +81,7 @@ NSArray *fetchLists(id store, id groups) {
         if (colorStr) entry[@"color"] = colorStr;
         if (groupName) entry[@"group"] = groupName;
         if (sections.count > 0) entry[@"sections"] = sections;
+        if (sectionDetails.count > 0) entry[@"sectionDetails"] = sectionDetails;
         entry[@"parentUUID"] = parentUUID ?: [NSNull null];
         [listEntries addObject:entry];
     }];

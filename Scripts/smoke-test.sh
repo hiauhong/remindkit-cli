@@ -469,7 +469,9 @@ COLLISION_LIST_ID=$("$BIN" add-list "$COLLISION_NAME" | python3 -c "import json,
 register_entity_id "$COLLISION_LIST_ID"
 COLLISION_SMART_A_ID=$("$BIN" add-smartlist "$COLLISION_NAME" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 register_entity_id "$COLLISION_SMART_A_ID"
-COLLISION_SMART_B_ID=$("$BIN" add-smartlist "$COLLISION_NAME" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+# 第二个同名智能列表：创建默认查重（smartListExists），这里显式放行以验证
+# 「普通列表与智能列表同名」的既有语义与 id 互不相同。
+COLLISION_SMART_B_ID=$("$BIN" add-smartlist "$COLLISION_NAME" --allow-duplicate | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 register_entity_id "$COLLISION_SMART_B_ID"
 check "duplicate smart-list creation returns distinct ids" "ok" \
     "$(ids_are_distinct "$COLLISION_LIST_ID" "$COLLISION_SMART_A_ID" "$COLLISION_SMART_B_ID")"
@@ -730,6 +732,112 @@ register_entity_id "$RS_SL_ID"
 "$BIN" add-section "$RS_SL_ID" 冒烟乙 --smart-list >/dev/null 2>&1
 check "reorder-section --smart-list returns ok" "ok" "$("$BIN" reorder-section "$RS_SL_ID" 冒烟乙 --first --smart-list | python3 -c "
 import json,sys; d=json.load(sys.stdin); print('ok' if d.get('ok') else 'bad:'+json.dumps(d))")"
+
+# ── 分区身份：add-section 幂等 / --allow-duplicate / delete-section --section-id ──
+# 2026-10 分区同名事故的回归：同名分区能被静默创建，删端按名字取首个匹配
+# 就会删掉有内容那一个。覆盖：幂等 + existed 回显、sectionDetails 带 id、
+# 同名时 add/delete 报 ambiguousSection、按 id 精确删除、缺参数/未知 id 的错误码。
+IDS_LIST="测试冒烟分区身份$TAG"
+IDS_LIST_ID=$("$BIN" add-list "$IDS_LIST" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$IDS_LIST_ID"
+
+SEC_CREATE=$("$BIN" add-section "$IDS_LIST_ID" 冒烟甲)
+check "add-section first create reports existed:false" "ok" "$(echo "$SEC_CREATE" | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('existed') is False and d.get('id') else 'bad:'+json.dumps(d,ensure_ascii=False))")"
+SEC_AGAIN=$("$BIN" add-section "$IDS_LIST_ID" 冒烟甲)
+check "add-section is idempotent (existed:true, same id)" "ok" "$(python3 - "$SEC_CREATE" "$SEC_AGAIN" <<'PYEOF'
+import json,sys
+a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2])
+print('ok' if b.get('existed') is True and a.get('id')==b.get('id') else 'bad:'+sys.argv[2])
+PYEOF
+)"
+check "idempotent add-section keeps a single section" "1" "$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$IDS_LIST_ID': print(len(c.get('sections') or []))
+")"
+check "list --format json exposes sectionDetails with id+name" "ok" "$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$IDS_LIST_ID':
+        det=c.get('sectionDetails') or []
+        print('ok' if len(det)==1 and det[0].get('id') and det[0].get('name')=='冒烟甲' else 'bad:'+json.dumps(det,ensure_ascii=False))
+")"
+"$BIN" add-section "$IDS_LIST_ID" 冒烟甲 --allow-duplicate >/dev/null 2>&1
+check "--allow-duplicate creates a second same-named section" "2" "$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$IDS_LIST_ID':
+        det=c.get('sectionDetails') or []
+        print(len(det) if len({d['id'] for d in det})==2 else 'bad')
+")"
+check "delete-section by name on duplicates reports ambiguousSection" "ok" "$({ "$BIN" delete-section "$IDS_LIST_ID" 冒烟甲 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='ambiguousSection' else 'bad')")"
+check "add --section on duplicates reports ambiguousSection" "ok" "$({ "$BIN" add "冒烟歧义$TAG" --list-id "$IDS_LIST_ID" --section 冒烟甲 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='ambiguousSection' else 'bad')")"
+SEC_IDS=$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$IDS_LIST_ID': print(' '.join(d['id'] for d in (c.get('sectionDetails') or [])))
+")
+read -r SEC_ID_A SEC_ID_B <<<"$SEC_IDS"
+check "delete-section --section-id removes only the targeted duplicate" "ok" "$("$BIN" delete-section "$IDS_LIST_ID" --section-id "$SEC_ID_B" >/dev/null 2>&1; "$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$IDS_LIST_ID':
+        det=c.get('sectionDetails') or []
+        print('ok' if len(det)==1 and det[0]['id']=='$SEC_ID_A' else 'bad:'+json.dumps(det,ensure_ascii=False))
+")"
+check "delete-section without name or --section-id is a usage error" "ok" "$({ "$BIN" delete-section "$IDS_LIST_ID" 2>&1 || true; } | grep -q '需要分区名' && echo ok || echo bad)"
+check "delete-section --section-id on unknown id reports noSuchSection" "ok" "$({ "$BIN" delete-section "$IDS_LIST_ID" --section-id 00000000-0000-0000-0000-000000000000 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='noSuchSection' else 'bad')")"
+
+# ── 创建查重：add-list / add-group / add-smartlist 默认拒绝同名 ──────────────
+# 同名实体会让名字寻址失效（读侧合并 + 警告、写侧强制 --list-id），而 Apple 允许
+# 同名。因此创建默认失败并回显既有 id，要建重复须显式 --allow-duplicate。
+# 提醒标题重复（add）仍然合法，不查重——这条也一并断言，防止将来误加限制。
+DUP_LIST="测试冒烟查重列表$TAG"
+DUP_LIST_ID=$("$BIN" add-list "$DUP_LIST" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$DUP_LIST_ID"
+check "add-list duplicate name reports listExists" "ok" "$({ "$BIN" add-list "$DUP_LIST" 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='listExists' else 'bad')")"
+check "add-list duplicate name did not create a second list" "1" "$("$BIN" list --format json | python3 -c "
+import json,sys
+d=json.load(sys.stdin); lists=d['lists'] if isinstance(d,dict) and 'lists' in d else d
+print(len([l for l in lists if l['title']=='$DUP_LIST']))
+")"
+check "add-list duplicate check ignores case" "ok" "$({ "$BIN" add-list "$(echo "$DUP_LIST" | tr 'a-z' 'A-Z')" 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='listExists' else 'bad')")"
+DUP_LIST_2=$("$BIN" add-list "$DUP_LIST" --allow-duplicate | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$DUP_LIST_2"
+check "--allow-duplicate creates the second same-named list" "ok" "$(test -n "$DUP_LIST_2" && test "$DUP_LIST_2" != "$DUP_LIST_ID" && echo ok || echo bad)"
+
+DUP_GROUP="测试冒烟查重分组$TAG"
+DUP_GROUP_ID=$("$BIN" add-group "$DUP_GROUP" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$DUP_GROUP_ID"
+check "add-group duplicate name reports groupExists" "ok" "$({ "$BIN" add-group "$DUP_GROUP" 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='groupExists' else 'bad')")"
+DUP_GROUP_2=$("$BIN" add-group "$DUP_GROUP" --allow-duplicate | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$DUP_GROUP_2"
+check "--allow-duplicate creates the second same-named group" "ok" "$(test -n "$DUP_GROUP_2" && test "$DUP_GROUP_2" != "$DUP_GROUP_ID" && echo ok || echo bad)"
+
+DUP_SMART="测试冒烟查重智能$TAG"
+DUP_SMART_ID=$("$BIN" add-smartlist "$DUP_SMART" --tag "冒烟查重$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$DUP_SMART_ID"
+check "add-smartlist duplicate name reports smartListExists" "ok" "$({ "$BIN" add-smartlist "$DUP_SMART" 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='smartListExists' else 'bad')")"
+DUP_SMART_2=$("$BIN" add-smartlist "$DUP_SMART" --allow-duplicate | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$DUP_SMART_2"
+check "--allow-duplicate creates the second same-named smart list" "ok" "$(test -n "$DUP_SMART_2" && test "$DUP_SMART_2" != "$DUP_SMART_ID" && echo ok || echo bad)"
+
+check "add still allows duplicate reminder titles in one list" "2" "$(
+"$BIN" add "冒烟同名提醒$TAG" --list-id "$DUP_LIST_ID" >/dev/null 2>&1
+"$BIN" add "冒烟同名提醒$TAG" --list-id "$DUP_LIST_ID" >/dev/null 2>&1
+"$BIN" query --list-id "$DUP_LIST_ID" --fields title | python3 -c "
+import json,sys
+print(len([r for r in json.load(sys.stdin) if r['title']=='冒烟同名提醒$TAG']))
+")"
 
 # ── Final hygiene: nothing we created may remain ────────────────────────────
 # cleanup runs explicitly here (and again via trap on exit; it is idempotent).

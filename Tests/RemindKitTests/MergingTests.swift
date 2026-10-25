@@ -67,11 +67,11 @@ final class MergingTests: XCTestCase {
     func testMergedCalendarsNormalizesNullParentUUID() {
         let lists: [ListRaw] = [
             ListRaw(uuid: "L1", name: "顶层", isGroup: false, icon: nil, color: nil,
-                    group: nil, sections: nil, parentUUID: "null"),
+                    group: nil, sections: nil, sectionDetails: nil, parentUUID: "null"),
             ListRaw(uuid: "L2", name: "组内", isGroup: false, icon: nil, color: nil,
-                    group: nil, sections: nil, parentUUID: "G1"),
+                    group: nil, sections: nil, sectionDetails: nil, parentUUID: "G1"),
             ListRaw(uuid: "G1", name: "分组", isGroup: true, icon: nil, color: nil,
-                    group: nil, sections: nil, parentUUID: nil),
+                    group: nil, sections: nil, sectionDetails: nil, parentUUID: nil),
         ]
         let merged = mergedCalendars(from: lists)
         let byID = Dictionary(uniqueKeysWithValues: merged.map { ($0.id, $0) })
@@ -81,18 +81,35 @@ final class MergingTests: XCTestCase {
         XCTAssertTrue(byID["G1"]?.isGroup ?? false)
     }
 
+    // MARK: - sectionDetails passthrough (same-named sections keep their ids)
+
+    func testMergedCalendarsPreservesSectionDetails() {
+        let details = [SectionDetail(id: "S1", name: "AI"), SectionDetail(id: "S2", name: "AI")]
+        let lists: [ListRaw] = [
+            ListRaw(uuid: "L1", name: "数码", isGroup: false, icon: nil, color: nil,
+                    group: nil, sections: ["AI", "AI"], sectionDetails: details, parentUUID: nil),
+        ]
+        let merged = mergedCalendars(from: lists)
+        XCTAssertEqual(merged.first?.sectionDetails?.map(\.id), ["S1", "S2"])
+
+        // Sidebar ordering rebuilds every entry — ids must survive that rebuild.
+        let reordered = applySidebarOrder(merged, ordering: ["L1"])
+        XCTAssertEqual(reordered.first?.sectionDetails?.map(\.id), ["S1", "S2"])
+        XCTAssertEqual(reordered.first?.sections, ["AI", "AI"])
+    }
+
     // MARK: - resolveListFilter (UUID → prefix → exact title → substring)
 
     private func makeCalendars() -> [CalendarEntry] {
         [
             CalendarEntry(id: "AAAAAAAA-1111-2222-3333-444444444444", title: "工作", isGroup: false,
-                          icon: nil, color: nil, sections: nil, parentUUID: nil, order: 0),
+                          icon: nil, color: nil, sections: nil, sectionDetails: nil, parentUUID: nil, order: 0),
             CalendarEntry(id: "BBBBBBBB-1111-2222-3333-444444444444", title: "待办", isGroup: false,
-                          icon: nil, color: nil, sections: nil, parentUUID: nil, order: 1),
+                          icon: nil, color: nil, sections: nil, sectionDetails: nil, parentUUID: nil, order: 1),
             CalendarEntry(id: "CCCCCCCC-1111-2222-3333-444444444444", title: "待办", isGroup: false,
-                          icon: nil, color: nil, sections: nil, parentUUID: nil, order: 2),
+                          icon: nil, color: nil, sections: nil, sectionDetails: nil, parentUUID: nil, order: 2),
             CalendarEntry(id: "DDDDDDDD-1111-2222-3333-444444444444", title: "测试选题", isGroup: false,
-                          icon: nil, color: nil, sections: nil, parentUUID: nil, order: 3),
+                          icon: nil, color: nil, sections: nil, sectionDetails: nil, parentUUID: nil, order: 3),
         ]
     }
 

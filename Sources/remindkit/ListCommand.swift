@@ -160,6 +160,9 @@ private struct ListEntryOutput: Codable {
     let icon: String?
     let color: String?
     let sections: [String]?
+    /// Section ids alongside `sections` (same order); write paths that must be
+    /// precise use these (Apple allows same-named sections in one list).
+    let sectionDetails: [SectionDetail]?
     let parentUUID: String?
     let parentTitle: String?
     let note: String?
@@ -172,6 +175,7 @@ private struct ListEntryOutput: Codable {
         icon = e.icon
         color = e.color
         sections = e.sections
+        sectionDetails = e.sectionDetails
         parentUUID = e.parentUUID
         self.parentTitle = parentTitle
         self.note = note

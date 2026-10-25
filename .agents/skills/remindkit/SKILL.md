@@ -54,7 +54,7 @@ allowed-tools:
 | 数量统计（全局/按列表） | `remindkit count [--list X]` | 省 token 首选 |
 | 每个列表的统计表 | `remindkit count --by-list` | 一次拿到全部列表统计，勿循环 count |
 | 有哪些列表/群组/分区 | `remindkit list` / `remindkit list --groups` / `remindkit list --brief`（紧凑结构，含分区名+备注；**末尾自动附带「🔍 智能列表」区块**） | |
-| **新增提醒（先看结构再写）** | `remindkit list --brief` 定列表+分区 → `remindkit add "…" --list <标题或--list-id UUID> --section <分区>` | **add 响应自带 `listTitle`+`section` 回显，无需再验证 query**；重名列表用 `--list-id` 精确定位 |
+| **新增提醒（先看结构再写）** | `remindkit list --brief` 定列表+分区 → `remindkit add "…" --list <标题或--list-id UUID> --section <分区>` | **add 响应自带 `listTitle`+`section` 回显，无需再验证 query**；重名列表用 `--list-id` 精确定位；`add-section` 同名幂等（返回 `existed:true`），不会建出两个同名分区 |
 | 全量导出 | `remindkit dump > reminders.json` | 数据量大，谨慎；`dump.smartLists` 默认只含自定义（`type: custom`）；系统智能列表（今天/旗标/已完成/已分配）是虚拟视图、事项都在普通列表里，默认不输出，`dump --system-smartlists` 才包含；「计划」无实体，用 `scheduled` 命令 |
 | 调整列表内任务顺序 | `remindkit reorder <id> --before <同级ID>` / `--after` / `--first`（置顶） / `--last`（置底） | 相对移动，锚点须在同一列表；子任务不支持（v1） |
 | 调整列表内**分区**顺序 | `remindkit reorder-section <列表> <分区> --first` / `--last` / `--before <分区>` / `--after <分区>` | 分区顺序独立于任务顺序；`--smart-list` 用于智能列表分区；锚点须在同一列表 |
@@ -88,6 +88,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 - **版本自检**：`remindkit --version` 输出当前版本（取自内置 skill 的 `skill-version:` 戳，与 `brew list --versions remindkit` 一致）——agent 排查「命令不存在/行为不一致」时先比对版本，避免照新版文档调旧二进制。
 - 所有查询命令**默认只返回未完成**；`--completed` 只查已完成；`--all` 查全部（`--completed` 与 `--all` 互斥）。
 - **JSON 日期字段**：`dueDate` 是 epoch（Double），同时输出 `dueDateText`（本地时区 `yyyy-MM-dd HH:mm`，全天提醒为 `00:00`）——判断今天/过期/几天内直接用 `dueDateText`，勿手转 epoch。
+- **创建查重（add-list / add-group / add-smartlist）**：同名实体已存在时**默认拒绝创建**（`listExists` / `groupExists` / `smartListExists`，消息里带既有 id 与归属），要建同名第二条须显式 `--allow-duplicate`。理由：Apple 允许同名，但重名后按名字寻址即失效（读侧合并输出 + stderr 警告、写侧强制 `--list-id`）。查重范围：列表名对列表名（大小写不敏感，含分组内列表）、分组名对分组名、智能列表名对**自定义智能列表**（与普通列表同名是既有语义，不算重复）。`add`（提醒标题）**不查重**——同列表里重复标题是真实需求。
 - **分区（section）字段**：查询命令**显式 `--list` 时自动带** `section`（列表结构查询的核心诉求，如「OKR 列表 → 健康/个人成长/财务…」）；无 `--list` 默认不带（性能，section 查询慢）。需要时 `--sections` 强制带 / `--no-sections` 强制跳过；`--section`/`--tree` 与 `--no-sections` 互斥。
 - **结构视图 `--tree`**：`query --list X --tree`（`--list-id` 也可）直接渲染「分区 → 任务 → 子任务」层级树（含父子缩进）——查列表内部结构用它，别从平铺 JSON 自己拼。**要求列表解析唯一**：同名/前缀命中多个会报 `ambiguousList`，用 `--list-id <完整UUID>` 精确定位。
 - **输出格式自动切换**：终端（TTY）默认 `plain`，管道/agent 调用自动 `json`——agent 无需每次带 `--format json`；也可显式 `--format json|plain|count` 覆盖。
@@ -110,7 +111,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 ## 错误与权限
 
 - 运行时错误（如权限被拒、找不到列表/提醒）输出到 **stderr** 的 JSON：`{"error":{"code":"…","message":"…"}}`，退出码 1；**用法错误（缺参数/互斥/格式错）是普通文本 + usage，退出码 64（非 JSON）**——agent 按退出码区分，别假设 stderr 永远可 `jq` 解析。**读侧与写侧同契约**。
-- **列表不存在**：`--list`/`--list-id`/`--to-id`/`--group-id` 匹配不到时退出码 1，stderr：`{"error":{"code":"noSuchList","message":"…"}}`（有近似候选时 message 附带 Did you mean 提示）。写侧业务码：noSuchList / noSuchReminder / noSuchGroup / noSuchAccount / noSuchDeletedRecord / noSuchSection / reminderKitError / unsupportedByEventKit / readOnly。
+- **列表不存在**：`--list`/`--list-id`/`--to-id`/`--group-id` 匹配不到时退出码 1，stderr：`{"error":{"code":"noSuchList","message":"…"}}`（有近似候选时 message 附带 Did you mean 提示）。写侧业务码：noSuchList / noSuchReminder / noSuchGroup / noSuchAccount / noSuchDeletedRecord / noSuchSection / **ambiguousSection**（同名分区：Apple 允许同一列表里两个分区重名，按名字操作会落在哪一个不确定，必须改用 `--section-id`）/ **listExists / groupExists / smartListExists**（创建查重：同名实体已存在则拒绝创建并回显既有 id，要建重复须 `--allow-duplicate`）/ invalidArgument / reminderKitError / unsupportedByEventKit / readOnly。
 - macOS 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制。
 - **新宿主首次使用（access: notDetermined）**：默认数据路径（ReminderKit 子进程）**从不触发授权弹窗**，未授权时静默返回空数据——普通查询命令永远不会弹窗。必须显式 `remindkit authorize`（或 `doctor --authorize`）调用 EventKit 授权路径触发系统弹窗；agent 用 `remindkit authorize --check --json` 非交互查状态，`--verify` 授权后验证主路径可读。
 - **受沙盒 agent 宿主**：若状态仍是 `notDetermined`，但显式 `authorize` 返回 `Mach error 4099`，说明 EventKit 的 XPC 连接在抵达 TCC 前已被执行沙盒阻断；这不是用户拒绝，**不要**重置 TCC。将 agent 切换为「完全访问」（Full Access）执行模式后，于同一会话运行 `remindkit authorize --verify`；这里的「完全访问」不是 macOS「完全磁盘访问」。若该 agent 无此模式，则改在可访问 macOS GUI/TCC 的非沙盒宿主会话中授权。Terminal 的授权仅归 Terminal，不能替代 agent 宿主的授权。
@@ -159,7 +160,7 @@ remindkit note --list 焦点 --set "重要事项"         # 智能列表也可�
 remindkit note --list <UUID前缀> --set "..."      # 智能列表 UUID 前缀
 # 智能列表：系统（今天/旗标/已完成/已分配）+ 自定义均可读可写；note --all 输出带 isSmartList/smartListType 标识
 # 存储：~/.local/share/remindkit/notes.json（可用 REMINDKIT_NOTES_FILE 改路径，如放 iCloud Drive 自动同步）
-# list --format json 输出携带 id/title/icon/color/sections/parentTitle/note/order（一次拿全结构）；--smart-lists 时输出 {lists, smartLists} 容器（智能列表含 filterData）
+# list --format json 输出携带 id/title/icon/color/sections/sectionDetails/parentTitle/note/order（一次拿全结构）；sectionDetails = [{id,name}] 是分区的稳定 id（与 sections 同序），同名列存在时只能靠它精确定位（delete-section --section-id）；--smart-lists 时输出 {lists, smartLists} 容器（智能列表含 filterData）
 # list --format plain（树形）和 count --by-list 的输出也会自动携带每个列表的 note 字段
 
 # 列表用途标注（agent 非交互流程，不跑 setup）
@@ -270,8 +271,14 @@ remindkit delete-list "测试列表2" --yes   # 永久删除，必须 --yes 确�
 
 # 层级写：分组（文件夹）→ 列表 → 分区 → 任务（苹果完整层级）
 remindkit add-group "工作"                  # 创建分组（文件夹）
-remindkit add-list "项目A" --group "工作"    # 在分组内建列表（--group-id 也可）
-remindkit add-section "项目A" "待办"            # 给列表加分区
+remindkit add-list "项目A" --group "工作"    # 在分组内建列表（--group-id 也可；--group 只接受名字）
+remindkit add-list "项目A" --allow-duplicate  # 默认查重：同名列表已存在 → listExists（回显既有 id/归属），不创建
+remindkit add-group "工作" --allow-duplicate  # 默认查重：同名分组 → groupExists
+remindkit add-smartlist "日用品" --allow-duplicate  # 默认查重：同名自定义智能列表 → smartListExists（与普通列表同名仍允许）
+remindkit add-section "项目A" "待办"            # 给列表加分区（**幂等**：同名已存在则返回 {ok,existed:true,id}，不重复创建）
+remindkit add-section "项目A" "待办" --allow-duplicate   # 确实要两个同名分区时才用（默认幂等）
+remindkit delete-section "项目A" "待办"               # 按名字删分区；同名多份时报 ambiguousSection（不猜）
+remindkit delete-section "项目A" --section-id 36792432-AF54-4101-B76B-5BFF13AA0B70   # 按 id 精确删（推荐；id 取自 list --format json 的 sectionDetails）
 remindkit add "写周报" --list "项目A" --section "待办"   # 新建提醒时直接归入分区
 remindkit update <id> --section "进行中"         # 把已有提醒移入另一分区（先 add-section 创建）
 remindkit reorder-section "项目A" "进行中" --first   # 调整分区显示顺序（--before/--after/--last）

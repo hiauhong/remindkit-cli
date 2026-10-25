@@ -25,8 +25,18 @@ struct CalendarEntry: Codable {
     let icon: String?
     let color: String?
     let sections: [String]?
+    /// Same sections as `sections`, but with their stable ids. Apple allows two
+    /// sections in one list to share a display name; name-only selectors then
+    /// cannot address them, so write paths that must be precise
+    /// (`delete-section --section-id`) need these ids.
+    let sectionDetails: [SectionDetail]?
     let parentUUID: String?
     let order: Int
+}
+
+struct SectionDetail: Codable {
+    let id: String
+    let name: String
 }
 
 struct ReminderEntry: Codable {
@@ -120,6 +130,7 @@ struct ListRaw: Codable {
     let color: String?
     let group: String?
     let sections: [String]?
+    let sectionDetails: [SectionDetail]?
     let parentUUID: String?
 }
 

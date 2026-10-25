@@ -117,6 +117,7 @@ func mergedCalendars(from lists: [ListRaw]) -> [CalendarEntry] {
             icon: l.icon,
             color: l.color,
             sections: l.sections,
+            sectionDetails: l.sectionDetails,
             parentUUID: (parentUUID != nil && parentUUID != "null") ? parentUUID : nil,
             order: idx
         )
@@ -146,6 +147,7 @@ func applySidebarOrder(_ calendars: [CalendarEntry], ordering: [String]) -> [Cal
         return CalendarEntry(
             id: e.id, title: e.title, isGroup: e.isGroup,
             icon: e.icon, color: e.color, sections: e.sections,
+            sectionDetails: e.sectionDetails,
             parentUUID: e.parentUUID, order: i
         )
     }
@@ -242,6 +244,7 @@ extension EventKitCalendar {
             icon: nil,
             color: nil,
             sections: nil,
+            sectionDetails: nil,
             parentUUID: nil,
             order: 0
         )

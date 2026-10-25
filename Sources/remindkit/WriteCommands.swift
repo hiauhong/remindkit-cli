@@ -1319,6 +1319,9 @@ struct AddList: ParsableCommand {
     @Option(name: .long, help: "Create the list inside this group (group ID)")
     var groupId: String?
 
+    @Flag(name: .long, help: "Create a second list with the same name (default: fail with listExists and create nothing)")
+    var allowDuplicate: Bool = false
+
     func run() throws {
         guardWriteEnabled()
         guard group == nil || groupId == nil else {
@@ -1327,6 +1330,7 @@ struct AddList: ParsableCommand {
         var request: [String: Any] = ["op": "createList", "name": name, "author": "remindkit"]
         if let group { request["groupName"] = group }
         if let groupId { request["groupID"] = groupId }
+        if allowDuplicate { request["allowDuplicate"] = true }
 
         let (source, result) = try writeWithReminderKit(request) {
             // EventKit fallback: no group support — plain top-level lists only.
@@ -1360,9 +1364,13 @@ struct AddGroup: ParsableCommand {
     @Argument(help: "New group name")
     var name: String
 
+    @Flag(name: .long, help: "Create a second group with the same name (default: fail with groupExists and create nothing)")
+    var allowDuplicate: Bool = false
+
     func run() throws {
         guardWriteEnabled()
-        let request: [String: Any] = ["op": "createGroup", "name": name, "author": "remindkit"]
+        var request: [String: Any] = ["op": "createGroup", "name": name, "author": "remindkit"]
+        if allowDuplicate { request["allowDuplicate"] = true }
         let (source, result) = try writeWithReminderKit(request) {
             fail("unsupportedByEventKit", "EventKit 不支持分组（需要 ReminderKit 子进程）")
         }
@@ -1395,10 +1403,14 @@ struct AddSection: ParsableCommand {
     @Flag(name: .long, help: "Target is a smart list (virtual view) instead of a regular list")
     var smartList: Bool = false
 
+    @Flag(name: .long, help: "Create a second section even if one with the same name already exists (default: idempotent — returns the existing one with existed:true)")
+    var allowDuplicate: Bool = false
+
     func run() throws {
         guardWriteEnabled()
         var request: [String: Any] = ["op": "addSection", "name": name, "author": "remindkit"]
         if smartList { request["smartList"] = true }
+        if allowDuplicate { request["allowDuplicate"] = true }
         if let listId { request["listID"] = listId } else { request["listName"] = list }
         let (source, result) = try writeWithReminderKit(request) {
             fail("unsupportedByEventKit", "EventKit 不支持分区（需要 ReminderKit 子进程）")
@@ -1420,15 +1432,26 @@ struct DeleteSection: ParsableCommand {
     @Argument(help: "List name or ID")
     var list: String
 
-    @Argument(help: "Section name to delete")
-    var name: String
+    @Argument(help: "Section name to delete (omit when using --section-id)")
+    var name: String?
 
     @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
     var listId: String?
 
+    @Option(name: .long, help: "Section ID — the precise selector, required when two sections share a name (ids come from list --format json → sectionDetails)")
+    var sectionId: String?
+
+    func validate() throws {
+        guard (name?.isEmpty == false) || sectionId != nil else {
+            throw ValidationError("需要分区名，或用 --section-id 指定分区 id")
+        }
+    }
+
     func run() throws {
         guardWriteEnabled()
-        var request: [String: Any] = ["op": "deleteSection", "name": name, "author": "remindkit"]
+        var request: [String: Any] = ["op": "deleteSection", "author": "remindkit"]
+        if let name, !name.isEmpty { request["name"] = name }
+        if let sectionId { request["sectionID"] = sectionId }
         if let listId { request["listID"] = listId } else { request["listName"] = list }
         let (source, result) = try writeWithReminderKit(request) {
             fail("unsupportedByEventKit", "EventKit 不支持分区（需要 ReminderKit 子进程）")
@@ -1526,9 +1549,13 @@ struct AddSmartList: ParsableCommand {
     @Option(name: .long, help: "Create inside this group (folder) — name or UUID")
     var group: String?
 
+    @Flag(name: .long, help: "Create a second smart list with the same name (default: fail with smartListExists and create nothing)")
+    var allowDuplicate: Bool = false
+
     func run() throws {
         guardWriteEnabled()
         var request: [String: Any] = ["op": "createSmartList", "name": name, "author": "remindkit"]
+        if allowDuplicate { request["allowDuplicate"] = true }
         if let displayName { request["displayName"] = displayName }
         if let color { request["color"] = color }
         if let group, !group.isEmpty {

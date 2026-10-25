@@ -1,158 +1,77 @@
-# remindkit — Apple Reminders 数据管道 CLI
+# remindkit — 在终端里管 Apple 提醒事项
 
 [![Vibe coded](https://img.shields.io/badge/vibe-coded-%23ff69b4?style=flat-square)](https://en.wikipedia.org/wiki/Vibe_coding)
 
 [English](README.en.md)
 
-remindkit 是一个 macOS 命令行工具，从 Apple Reminders（提醒事项）导出结构化数据，并支持**全层级读写**——从**列表文件夹 → 列表 → 分区 → 任务 → 子任务**，五层一路打通。**面向 AI agent 设计**：统一 JSON 输出、机器可解析的错误契约、内置 agent skill。
+给用 Mac「提醒事项」的人：一条命令看清今天要做什么，也能直接新建、改期、完成、删除，不用在 App 里一层层点。
+数据始终留在 Apple 提醒事项里 —— remindkit 只是在终端里读写它，不替代 App。
 
+> ⚠️ 通过苹果**私有框架** `ReminderKit.framework` 读写数据，不受苹果支持，可能随 macOS 更新失效；与 Apple Inc. 无关联，仅供个人使用与学习研究。
 
-> 🤖 **Vibe coding 项目**：功能、测试与文档由 AI agent 协作产出（vibe coding），**未经人工逐行审查，请谨慎用于生产环境**。
+> 🔒 所有数据只在本机处理：remindkit 不发起任何网络请求，提醒内容（账单 / 健康 / 位置等）不上传。
 
-> **⚠️ 免责声明** — 通过苹果**私有框架** `ReminderKit.framework` 提取数据,不受苹果支持,可能随 macOS 更新失效;与 Apple Inc. 无任何关联,仅供个人使用与学习研究。
-
-> **🔒 隐私**
-> - 所有数据**仅在本机处理**：CLI 不发起任何网络请求，不上传提醒内容（账单/健康/位置等敏感信息始终留在本机）。
-> - 需要授予「提醒事项」访问权限（TCC）；首次运行按系统提示授权即可，权限归属于宿主进程。
-> - 不需要 macOS「完全磁盘访问」。若 agent 的受限执行模式授权时报 `Mach error 4099`，请切换到 agent「完全访问」（Full Access）模式后重试；两者不是同一权限。
-
-## 完整层级：列表文件夹 → 列表 → 分区 → 任务 → 子任务
-
-Apple Reminders 的五级数据层级，remindkit **读、写全部支持**——这正是公共 EventKit API 做不到的部分：
-
-```
-列表文件夹（分组 / group）                  ← add-group
- └── 列表（list / calendar）                ← add-list --group
-      ├── 分区（section，macOS 26+）        ← add-section
-      └── 任务（task / reminder）           ← add --list / --section
-           └── 子任务（subtask，仅一层，苹果原生限制）← add --parent <id> / update --parent <id>
-```
-
-- **读**：`dump` / `list --groups` / `list --format json` 全量输出层级关系，字段一一对应：`isGroup` / `parentUUID`（文件夹）、`sections`（分区）、`parentId` / `subtaskIds`（子任务树）
-- **写**：从顶层一路建到叶子——`add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`；`move` 可在任意层级间调整归属；`update --parent/--no-parent` 把已有任务挂为/解除子任务
-
-## 特性
-
-- **结构化 JSON 导出**：列表、分组（文件夹）、分区、子任务、标签、旗标、紧急、智能列表——含公共 EventKit API **拿不到**的字段（见下文矩阵）
-- **完整写路径**：列表文件夹 → 列表 → 分区 → 任务 → 子任务，五级全覆盖（增/改/完成/删除/移动），另含智能列表
-- **双源架构**：ReminderKit 私有框架为主数据源，EventKit 公共 API 兜底，每次导出带 `source` 标注
-- **agent 优先**：默认 JSON 输出、统一错误契约（stderr JSON + 退出码）、`--fields` 投影省 token、内置 skill 一键安装
-
-
-## 安装
+## 怎么用（3 步）
 
 ```bash
+# ① 安装
 brew install hiauhong/tap/remindkit
-# 每次运行自动同步 agent skill（缺失安装；内容不一致按 skill-version 语义化版本比较后更新；终端可见提示；REMINDKIT_NO_AUTO_SKILL=1 关闭）；Claude Code 用户补：remindkit install-skill --claude
-# 或
-./Scripts/install.sh     # 装完自动注册 agent skill
+
+# ② 授权：第一次会弹系统框，点「允许」（同一个终端只需一次）
+remindkit authorize --verify
+
+# ③ 开始用
+remindkit                                               # 今天 / 过期 / 未来 / 旗标 / 紧急，一屏看完
+remindkit add "买牛奶" --list 待办 --due "2026-08-05 09:00"   # 列表名换成你自己的
 ```
 
-## 首次使用:授权 + 备份
+不用 Homebrew：在仓库目录跑 `./Scripts/install.sh`（装到 `~/.local/bin`，不需要 sudo）。升级用 `brew upgrade remindkit`。
 
-```bash
-remindkit doctor                        # ① 检查权限
-remindkit authorize --verify            # ② 首次授权：触发系统授权框，点「允许」后验证读取路径
-remindkit dump > ~/reminders-backup.json   # ③ 先做全量基线备份
-```
+## 能做什么
 
-> 权限归属于宿主进程(终端/agent 宿主)。若 agent 在受限执行模式下，`authorize` 于 `notDetermined` 状态返回 `Mach error 4099`，请切换到 agent「完全访问」（Full Access）模式后重试 `remindkit authorize --verify`；这不是 macOS「完全磁盘访问」。若该 agent 无此模式，则需改由可访问 macOS GUI/TCC 的非沙盒宿主会话授权；Terminal 的授权不适用于其他 agent 宿主。之后进行写操作(完成/删除/移动/批量)前,可随时再 dump 对照,心里有底。
+- **看**：`remindkit` 一屏给出今天、过期、未来、旗标、紧急；`today` / `overdue` / `scheduled` / `flagged` / `urgent` 按需细看。
+- **找和数**：`search` 搜标题 / 备注 / 标签，`count --by-list` 一次拿到每个列表的统计。
+- **改**：新建、改期、改优先级、打标签、加提醒、重复任务、完成、移动、删除、批量操作。
+- **管结构**：列表文件夹 → 列表 → 分区 → 任务 → 子任务，五层都能建、能改、能移。
+- **导出**：`remindkit dump` 输出完整 JSON，方便备份或喂给别的工具。
 
-## 快速开始
+## 常用命令
 
-```bash
-remindkit                # 概览:今天/过期/未来/旗标/紧急
-remindkit today          # 今日到期
-remindkit overdue        # 已过期
-remindkit search "牛奶"   # 搜索
-remindkit search "牛奶 面包"   # 多关键词：任一命中（OR）；加 --match-all 全部命中（AND）
-remindkit add "买牛奶" --list 待办 --due "2026-08-03 09:00"
-remindkit complete <id>  # 完成
-```
+| 想做什么 | 命令 |
+|---|---|
+| 看今天该做什么 | `remindkit` |
+| 今天到期 / 已过期 | `remindkit today` / `remindkit overdue` |
+| 搜标题、备注、标签 | `remindkit search "牛奶"` |
+| 看某个列表 | `remindkit query --list 工作` |
+| 数一数（按列表） | `remindkit count --by-list` |
+| 新建 / 完成 | `remindkit add "写周报" --list 工作 --due "2026-08-05 10:00"` / `remindkit complete <id>` |
+| 全量导出 / 备份 | `remindkit dump > ~/reminders-backup.json` |
+| 权限出问题 | `remindkit doctor` |
+| 看全部命令 | `remindkit --help` |
 
-## 面向 AI agent
+> `<id>` 从任意查询结果里拿。删除是软删除，进「最近删除」，30 天后由系统清理。
 
-- 查询默认只返回**未完成**;`--all` / `--completed` 切换
-- 默认 JSON 输出;**运行时业务错误**为 stderr JSON `{"error":{...}}` + 退出码(1 运行时 / 64 用法);**usage/参数解析错误是普通文本 + usage（非 JSON）**——agent 以退出码区分错误类型，不要假设所有错误都可 `jq` 解析
-- 完整层级写:列表文件夹→列表→分区→任务→子任务;含标签/旗标/紧急/智能列表/批量
-- 内置 skill：`remindkit install-skill` 手动注册；**每次运行自动同步 `~/.agents/skills/` 副本**（缺失安装；内容不一致时按 `skill-version:` 语义化版本比较——发行版更新则覆盖、安装版更新（手工修订）则保留、缺版本戳再回落覆盖，agent 新会话生效）
-- 全部命令与参数见 `remindkit <命令> --help`;agent 细则见 [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)
-- 支持边界逐项评估(✅ 完整 / 🟡 受限 / ❌ 不支持,如日常采购列表、模板、图片附件等)见 [docs/apple-reminders-support.md](docs/apple-reminders-support.md)
+## 已知限制
 
-## 安全约定
+- **系统要求**：macOS 14 及以上；列表里的「分区」要 macOS 26 及以上。
+- **权限**：需要「提醒事项」访问权限。权限记在**运行它的 App** 上（终端 / AI 工具的宿主），不是 remindkit 本身 —— 换一个 App 跑要重新授权。**不需要**「完全磁盘访问」。
+- **第一次必须手动授权**：普通查询不会弹框，没授权时它只是安静地返回空数据，容易误以为「没有提醒」；跑一次 `remindkit authorize --verify` 才会弹框。
+- **受限 / 沙盒模式的 AI 工具**可能报 `Mach error 4099`：把工具切到「完全访问」（Full Access）执行模式再授权；这和 macOS「完全磁盘访问」不是同一个权限。若该工具没有这个模式，需换一个能弹窗的终端来授权。
+- **iCloud**：remindkit 不联网、不触发同步，读的是 Mac 本地当前数据（本地还没同步下来的改动读不到）；共享 / 协作列表不支持。
+- **暂不支持**：图片附件、模板、「发信息时提醒」、日常采购列表的分类分组、写入时区；子任务只有一层（苹果原生限制）。
+- **最近删除 / 恢复**只覆盖 remindkit 自己删的，在提醒事项 App 里删的看不到。
+- 写操作前建议先备份：`remindkit dump > ~/reminders-backup.json`。
 
-| 能力 | 字段 | 说明 |
-|------|------|------|
-| 标签 | `reminders[].tags` | EventKit 不暴露 |
-| 分区 | `reminders[].section` / `calendars[].sections` | macOS 26+ |
-| 子任务 | `reminders[].parentId` / `.subtaskIds` | 子任务树 |
-| 旗标 / 紧急 | `flagged` / `urgent` | |
-| 图标 / 颜色 | `calendars[].icon` / `.color` | 列表 emoji 与十六进制色 |
-| 群组 | `calendars[].isGroup` / `.parentUUID` | 文件夹结构 |
-| 智能列表 | `smartLists[]` | 系统（今天/旗标/已完成/已分配）与自定义；系统为虚拟视图默认不输出 |
-| 提前/位置提醒 | `reminders[].alarms` | 四种触发（date/interval/dueDateDelta/location） |
-| 全局排序 | `listIDsOrdering` | 侧边栏顺序 |
+## 给开发者
 
-## 写操作
-
-```bash
-# 任务：增/改/完成/删/移（ReminderKit 私有框架写为主，EventKit 兜底）
-remindkit add "买牛奶" --list 日常 --due "2026-08-03 09:00" --priority high \
-  --repeat weekly --days mon,wed --tag 购物 --urgent --flagged \
-  --notes "备注" --url "https://…" --alarm-before 30
-remindkit update <id> --title "新标题" --due "2026-08-15 15:30" --priority medium --tag 生活
-remindkit update <id> --priority none   # 清除优先级
-remindkit update <id> --url "https://example.com/new"  # 替换旧 URL
-remindkit update <id> --repeat monthly  # 替换全部已有重复规则，不会追加
-remindkit update <id> --no-repeat       # 清除全部重复规则
-remindkit complete <id>          # 重复提醒完成后自动滚动到下一期，响应带 nextOccurrence
-remindkit delete <id>            # 软删除 → 最近删除（30 天系统清除）
-remindkit move <id> --to 日常
-
-# 层级：列表文件夹 → 列表 → 分区 → 任务 → 子任务
-remindkit add-group "工作"                              # ① 列表文件夹（分组）
-remindkit add-list "项目A" --group "工作"                # ② 列表
-remindkit add-section "项目A" "待办"                     # ③ 分区
-remindkit add "写周报" --list "项目A" --section "待办"    # ④ 任务
-remindkit add "整理大纲" --list "项目A" --parent <写周报的ID>   # ⑤ 子任务（可继续嵌套）
-
-# 批量：破坏性操作预览时不需 --yes，真正执行时才需
-remindkit bulk --op delete --list 日常 --due-before 2026-08-02 --dry-run
-remindkit bulk --op delete --list 日常 --due-before 2026-08-02 --yes  # 软删除，可 recently-deleted/restore
-```
-
-> **安全约定**：同名列表（如两个「数码」「财务」）务必用 ID 定位；`delete-list` 永久删除需 `--yes`；测试写操作只在「测试冒烟*」列表上进行（自建自删、零残留）。
-
-## 输出格式
-
-统一 JSON Schema（`dump` 全量导出）：
-
-```json
-{
-  "version": 1,
-  "source": "reminderKit",        // reminderKit | eventKit
-  "calendars": [{ "id": "…", "title": "工作", "isGroup": false, "icon": "💼",
-                  "color": "#007aff", "sections": ["重要"], "parentUUID": null, "order": 0 }],
-  "reminders": [{ "id": "…", "calendarId": "…", "title": "买牛奶", "completed": false,
-                  "priority": 0, "dueDate": 1785859200, "dueDateText": "2026-08-05 00:00",
-                  "tags": ["购物"], "flagged": true, "urgent": false,
-                  "section": "待办", "parentId": null, "subtaskIds": [] }],
-  "smartLists": [{ "uuid": "…", "name": "想买", "type": "custom", "filterData": "…" }],
-  "listIDsOrdering": ["uuid1", "uuid2"]
-}
-```
-
-
-## 开发
-
-```bash
-make build             # 编译（ObjC 子二进制 + Swift CLI）
-make test-regressions  # 日常聚焦回归：只测近期高风险改动
-make test              # 合并/发版前：完整冒烟 + skill 契约测试
-```
-
-两种冒烟测试都只操作本次创建的「测试冒烟*」实体，并按记录的精确 UUID 清理；不会按名称前缀批量删除。
+- **双数据源**：ReminderKit 私有框架为主（字段最全），EventKit 公共 API 兜底；`dump` 的 `source` 标明来源，降级时响应带 `degraded: true`。
+- **输出**：终端里默认纯文本，管道 / agent 调用自动 JSON；只要几个字段时用 `--fields id,title,dueDate` 省 token。
+- **错误契约**：运行时错误 → stderr JSON + 退出码 1；用法错误 → 普通文本 + 退出码 64（不要假设所有错误都能 `jq` 解析）。
+- **支持边界**（每项苹果功能 ✅ / 🟡 / ❌）：[docs/apple-reminders-support.md](docs/apple-reminders-support.md)
+- **agent 命令契约**：[.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)；每次运行自动同步到 `~/.agents/skills/`（`REMINDKIT_NO_AUTO_SKILL=1` 关闭），Claude Code 用 `remindkit install-skill --claude`。
+- **只读模式**：`REMINDKIT_READ_ONLY=1` 拒绝一切写操作。重名列表用 ID 定位；`delete-list` 是永久删除，需 `--yes`。
+- **构建 / 测试**：`make build`；日常 `make test-regressions`，发版前 `make test`（冒烟测试需本机提醒事项权限，只碰自建的「测试冒烟*」列表，自建自删）。
 
 ## License
 
-MIT(含私有框架免责声明,见 [LICENSE](LICENSE))
+MIT（含私有框架免责声明，见 [LICENSE](LICENSE)）。

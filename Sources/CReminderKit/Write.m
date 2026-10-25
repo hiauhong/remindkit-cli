@@ -1193,6 +1193,51 @@ static NSDictionary *fetchAllGroups(id store) {
     return map;
 }
 
+/// 创建查重：同名列表（大小写不敏感精确匹配）。
+/// Apple 允许同名列表，但重名后按名字寻址即失效（读侧合并输出 + 警告，写侧强制
+/// --list-id），所以默认拒绝创建，要建重复须显式 allowDuplicate（--allow-duplicate）。
+static NSArray *listsNamedIgnoringCase(id store, NSString *name) {
+    NSMutableArray *matches = [NSMutableArray array];
+    void (^lb)(id, BOOL *) = ^(id list, BOOL *sp) {
+        NSString *n = [list valueForKey:@"name"];
+        if ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame) {
+            [matches addObject:list];  // non-ARC: array retains; no extra retain → no leak
+        }
+    };
+    ((void(*)(id, SEL, id))objc_msgSend)(store, NSSelectorFromString(@"enumerateAllListsWithBlock:"), lb);
+    return matches;
+}
+
+/// 创建查重：同名分组（大小写不敏感精确匹配）。
+static NSArray *groupsNamedIgnoringCase(id store, NSString *name) {
+    NSDictionary *groups = fetchAllGroups(store);
+    NSMutableArray *matches = [NSMutableArray array];
+    for (NSString *uuid in groups) {
+        NSString *n = [groups[uuid] valueForKey:@"name"];
+        if ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame) {
+            [matches addObject:groups[uuid]];
+        }
+    }
+    return matches;
+}
+
+/// 创建查重：同名**自定义智能列表**（大小写不敏感精确匹配）。
+/// 注意范围只到智能列表：与普通列表同名是既有语义（--list-id / --id 消歧），不算重复。
+static NSArray *smartListsNamedIgnoringCase(id store, NSString *name) {
+    NSError *err = nil;
+    id sls = ((id(*)(id, SEL, id*))objc_msgSend)(store,
+        NSSelectorFromString(@"fetchCustomSmartListsWithError:"), &err);
+    if (![sls isKindOfClass:[NSArray class]]) return @[];
+    NSMutableArray *matches = [NSMutableArray array];
+    for (id sl in (NSArray *)sls) {
+        NSString *n = [sl valueForKey:@"name"];
+        if ([n isKindOfClass:[NSString class]] && [n caseInsensitiveCompare:name] == NSOrderedSame) {
+            [matches addObject:sl];
+        }
+    }
+    return matches;
+}
+
 /// Resolve a group by exact ID or exact name; ambiguous names error out.
 static id resolveGroup(id store, NSString *groupID, NSString *groupName, NSDictionary **error) {
     NSDictionary *groups = fetchAllGroups(store);
@@ -1239,12 +1284,49 @@ static id findSectionInList(id store, id list, NSString *sectionName) {
     return nil;
 }
 
+/// Ambiguity-safe sibling of `findSectionInList`: Apple allows two sections in
+/// the same list to share a display name (2026-10 `add-section` could even
+/// create such duplicates silently), and name-only resolution would then file
+/// a reminder into an arbitrary one. This collects *all* name matches and
+/// refuses to guess: >1 match sets `errOut` to an `ambiguousSection` error
+/// carrying every candidate id. 0 matches leaves `errOut` untouched (caller
+/// reports noSuchSection with its own wording).
+static id findSoleSectionInList(id store, id list, NSString *sectionName, NSDictionary **errOut) {
+    NSError *err = nil;
+    id lsdv = [[NSClassFromString(@"REMListSectionsDataView") alloc] initWithStore:store];
+    if (!lsdv) return nil;
+    id secs = ((id(*)(id, SEL, id, id*))objc_msgSend)(lsdv,
+        NSSelectorFromString(@"fetchListSectionsWithListObjectID:error:"),
+        [list valueForKey:@"objectID"], &err);
+    if (![secs respondsToSelector:@selector(count)]) return nil;
+    NSInteger count = ((NSInteger(*)(id, SEL))objc_msgSend)(secs, @selector(count));
+    NSMutableArray *matches = [NSMutableArray array];
+    for (NSInteger i = 0; i < count; i++) {
+        id secObj = ((id(*)(id, SEL, NSInteger))objc_msgSend)(secs, @selector(objectAtIndex:), i);
+        NSArray *names = parseSectionNames(secObj);
+        if (names.count > 0 && [names[0] isEqualToString:sectionName]) [matches addObject:secObj];
+    }
+    if (matches.count > 1 && errOut) {
+        NSMutableArray *ids = [NSMutableArray array];
+        for (id m in matches) [ids addObject:extractUUID([m valueForKey:@"objectID"]) ?: @""];
+        *errOut = @{@"ok": @NO, @"code": @"ambiguousSection",
+            @"error": [NSString stringWithFormat:
+                @"列表「%@」有 %lu 个同名分区「%@」，无法确定落点（候选 id：%@）；用 list --format json 的 sectionDetails 取 id 后按 id 操作，或先清理重复分区",
+                [list valueForKey:@"name"] ?: @"", (unsigned long)matches.count, sectionName,
+                [ids componentsJoinedByString: @", "]]};
+        return nil;
+    }
+    return matches.firstObject;
+}
+
 /// Attach a reminder change item to an existing section of its list via a
 /// REMMembership(member=reminder, group=section). Returns nil on success or
-/// an error dict (section missing / list has no sections).
+/// an error dict (section missing / ambiguous / list has no sections).
 static NSDictionary *setReminderSection(id store, id saveReq, id list, id remCI, NSString *sectionName) {
     if (!list) return @{@"ok": @NO, @"error": @"无法确定提醒所属列表"};
-    id section = findSectionInList(store, list, sectionName);
+    NSDictionary *ambErr = nil;
+    id section = findSoleSectionInList(store, list, sectionName, &ambErr);
+    if (ambErr) return ambErr;
     if (!section) {
         return @{@"ok": @NO, @"code": @"noSuchSection", @"error": [NSString stringWithFormat:
             @"列表「%@」中没有分区「%@」（先用 add-section 创建）",
@@ -1277,6 +1359,20 @@ static NSDictionary *opCreateGroup(id store, NSDictionary *req) {
     if (![name isKindOfClass:[NSString class]] || name.length == 0) {
         return @{@"ok": @NO, @"error": @"分组名不能为空"};
     }
+    if (![req[@"allowDuplicate"] boolValue]) {
+        NSArray *existing = groupsNamedIgnoringCase(store, name);
+        if (existing.count > 0) {
+            NSMutableArray *parts = [NSMutableArray array];
+            for (id g in existing) {
+                [parts addObject:[NSString stringWithFormat:@"%@[%@]", name,
+                    extractUUID([g valueForKey:@"objectID"]) ?: @""]];
+            }
+            return @{@"ok": @NO, @"code": @"groupExists",
+                     @"error": [NSString stringWithFormat:
+                        @"分组「%@」已存在（%@）；未创建。确需再建一个同名分组请加 --allow-duplicate",
+                        name, [parts componentsJoinedByString:@", "]]};
+        }
+    }
     NSError *err = nil;
     id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
     id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;
@@ -1298,6 +1394,15 @@ static NSDictionary *opCreateList(id store, NSDictionary *req) {
     NSString *name = req[@"name"];
     if (![name isKindOfClass:[NSString class]] || name.length == 0) {
         return @{@"ok": @NO, @"error": @"列表名不能为空"};
+    }
+    if (![req[@"allowDuplicate"] boolValue]) {
+        NSArray *existing = listsNamedIgnoringCase(store, name);
+        if (existing.count > 0) {
+            return @{@"ok": @NO, @"code": @"listExists",
+                     @"error": [NSString stringWithFormat:
+                        @"列表「%@」已存在（%@）；未创建。确需再建一条同名列表请加 --allow-duplicate，或改用已有 id（--list-id）",
+                        name, describeListCandidates(store, existing)]};
+        }
     }
     NSError *err = nil;
     id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
@@ -1333,23 +1438,39 @@ static NSDictionary *opCreateList(id store, NSDictionary *req) {
     return out;
 }
 
-/// Add a section to a list. req: {op:addSection, listID?/listName, name, author}.
-/// Set smartList=true to target a custom smart list (uses the smart-list
-/// section path: updateSmartList: → sectionsContextChangeItem →
-/// addSmartListSectionWithDisplayName:).
+/// Add a section to a list. req: {op:addSection, listID?/listName, name,
+/// author, allowDuplicate?}. Set smartList=true to target a custom smart list
+/// (uses the smart-list section path: updateSmartList: →
+/// sectionsContextChangeItem → addSmartListSectionWithDisplayName:).
+///
+/// Idempotent by default: Apple allows two sections to share a display name and
+/// name-only resolution cannot tell them apart afterwards (2026-10 incident:
+/// `add-section` created a second "AI", and `delete-section` then removed the
+/// one that actually held the reminders). So a same-named section short-circuits
+/// to `{ok, existed:true, id}` and creating a duplicate requires the explicit
+/// `--allow-duplicate` (req `allowDuplicate`).
 static NSDictionary *opAddSection(id store, NSDictionary *req) {
     NSString *name = req[@"name"];
     if (![name isKindOfClass:[NSString class]] || name.length == 0) {
         return @{@"ok": @NO, @"error": @"分区名不能为空"};
     }
     BOOL smart = [req[@"smartList"] boolValue];
+    BOOL allowDuplicate = [req[@"allowDuplicate"] boolValue];
     NSError *err = nil;
-    id saveReq = makeSaveRequest(store, req[@"author"]);
 
     if (smart) {
         NSDictionary *slErr = nil;
         id smartList = resolveSmartList(store, req[@"listID"], req[@"listName"], &slErr);
         if (!smartList) return slErr;
+        if (!allowDuplicate) {
+            id existing = findSectionInSmartList(store, smartList, name);
+            if (existing) {
+                return @{@"ok": @YES, @"existed": @YES, @"name": name,
+                         @"id": extractUUID([existing valueForKey:@"objectID"]) ?: @"",
+                         @"smartListID": extractUUID([smartList valueForKey:@"objectID"]) ?: @""};
+            }
+        }
+        id saveReq = makeSaveRequest(store, req[@"author"]);
         id slCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateSmartList:"), smartList);
         id sectionCtx = [slCI valueForKey:@"sectionsContextChangeItem"];
         if (!sectionCtx) return @{@"ok": @NO, @"error": @"智能列表不支持分区"};
@@ -1358,13 +1479,22 @@ static NSDictionary *opAddSection(id store, NSDictionary *req) {
             name, sectionCtx);
         if (!sectionCI) return @{@"ok": @NO, @"error": @"创建分区失败"};
         if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-        return @{@"ok": @YES, @"id": extractUUID([sectionCI valueForKey:@"objectID"]) ?: @"",
+        return @{@"ok": @YES, @"existed": @NO, @"id": extractUUID([sectionCI valueForKey:@"objectID"]) ?: @"",
                  @"name": name, @"smartListID": extractUUID([smartList valueForKey:@"objectID"]) ?: @""};
     }
 
     NSDictionary *listErr = nil;
     id list = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
     if (!list) return listErr;
+    if (!allowDuplicate) {
+        id existing = findSectionInList(store, list, name);
+        if (existing) {
+            return @{@"ok": @YES, @"existed": @YES, @"name": name,
+                     @"id": extractUUID([existing valueForKey:@"objectID"]) ?: @"",
+                     @"listID": extractUUID([list valueForKey:@"objectID"]) ?: @""};
+        }
+    }
+    id saveReq = makeSaveRequest(store, req[@"author"]);
     id listCI = ((id(*)(id, SEL, id))objc_msgSend)(saveReq, NSSelectorFromString(@"updateList:"), list);
     id sectionCtx = [listCI valueForKey:@"sectionsContextChangeItem"];
     if (!sectionCtx) return @{@"ok": @NO, @"error": @"列表不支持分区"};
@@ -1372,17 +1502,26 @@ static NSDictionary *opAddSection(id store, NSDictionary *req) {
         NSSelectorFromString(@"addListSectionWithDisplayName:toListSectionContextChangeItem:"), name, sectionCtx);
     if (!sectionCI) return @{@"ok": @NO, @"error": @"创建分区失败"};
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-    return @{@"ok": @YES, @"id": extractUUID([sectionCI valueForKey:@"objectID"]) ?: @"",
+    return @{@"ok": @YES, @"existed": @NO, @"id": extractUUID([sectionCI valueForKey:@"objectID"]) ?: @"",
              @"name": name, @"listID": extractUUID([list valueForKey:@"objectID"]) ?: @""};
 }
 
 /// Delete a section from a list. req: {op:deleteSection, listID?/listName,
-/// name, author}. Deleting a section removes the grouping itself; any
-/// reminders filed in it are moved to the list's un-sectioned area.
+/// name?, sectionID?, author}. Deleting a section removes the grouping itself;
+/// any reminders filed in it are moved to the list's un-sectioned area.
+///
+/// `sectionID` (from `list --format json` → sectionDetails) is the precise
+/// selector and the only safe one once two sections share a name; a name that
+/// matches more than one section fails with `ambiguousSection` + candidate ids
+/// instead of guessing (2026-10 incident: name-only delete removed the section
+/// that held the reminders).
 static NSDictionary *opDeleteSection(id store, NSDictionary *req) {
     NSString *name = req[@"name"];
-    if (![name isKindOfClass:[NSString class]] || name.length == 0) {
-        return @{@"ok": @NO, @"error": @"分区名不能为空"};
+    NSString *sectionID = req[@"sectionID"];
+    BOOL hasID = [sectionID isKindOfClass:[NSString class]] && sectionID.length > 0;
+    if (!hasID && (![name isKindOfClass:[NSString class]] || name.length == 0)) {
+        return @{@"ok": @NO, @"code": @"invalidArgument",
+                 @"error": @"需要分区名，或用 --section-id 指定分区 id"};
     }
     NSDictionary *listErr = nil;
     id list = resolveList(store, req[@"listID"], req[@"listName"], &listErr);
@@ -1394,20 +1533,55 @@ static NSDictionary *opDeleteSection(id store, NSDictionary *req) {
     id sectionCtx = [listCI valueForKey:@"sectionsContextChangeItem"];
     if (!sectionCtx) return @{@"ok": @NO, @"error": @"列表不支持分区"};
 
-    // 拿现有分区（change item 上下文），按显示名匹配
+    // 拿现有分区（change item 上下文），按 id 优先、其次按显示名匹配
     id secs = ((id(*)(id, SEL, id, id*))objc_msgSend)(store,
         NSSelectorFromString(@"fetchListSectionsForListSectionContextChangeItem:error:"), sectionCtx, &err);
     if (![secs respondsToSelector:@selector(count)]) return @{@"ok": @NO, @"error": @"获取分区失败"};
     NSInteger count = ((NSInteger(*)(id, SEL))objc_msgSend)(secs, @selector(count));
-    id section = nil;
+    NSMutableArray *matches = [NSMutableArray array];
     for (NSInteger i = 0; i < count; i++) {
         id secObj = ((id(*)(id, SEL, NSInteger))objc_msgSend)(secs, @selector(objectAtIndex:), i);
-        NSArray *names = parseSectionNames(secObj);
-        if (names.count > 0 && [names[0] isEqualToString:name]) { section = secObj; break; }
+        if (hasID) {
+            NSString *sid = extractUUID([secObj valueForKey:@"objectID"]);
+            if (sid.length > 0 && [sid caseInsensitiveCompare:sectionID] == NSOrderedSame) {
+                [matches addObject:secObj];
+            }
+        } else {
+            NSArray *names = parseSectionNames(secObj);
+            if (names.count > 0 && [names[0] isEqualToString:name]) [matches addObject:secObj];
+        }
     }
-    if (!section) return @{@"ok": @NO, @"error": [NSString stringWithFormat:@"找不到分区：%@", name]};
+    if (matches.count == 0) {
+        return @{@"ok": @NO, @"code": @"noSuchSection",
+                 @"error": hasID
+                    ? [NSString stringWithFormat:@"列表中找不到分区 id：%@", sectionID]
+                    : [NSString stringWithFormat:@"找不到分区：%@", name]};
+    }
+    if (matches.count > 1) {
+        // 同名多份：不猜，列出候选 id 让调用方用 --section-id 精确定位
+        NSMutableArray *candidates = [NSMutableArray array];
+        NSMutableArray *candidateIDs = [NSMutableArray array];
+        for (id m in matches) {
+            NSArray *names = parseSectionNames(m);
+            NSString *sid = extractUUID([m valueForKey:@"objectID"]) ?: @"";
+            [candidateIDs addObject:sid];
+            [candidates addObject:@{
+                @"id": sid,
+                @"name": names.count > 0 ? names[0] : @""
+            }];
+        }
+        return @{@"ok": @NO, @"code": @"ambiguousSection",
+                 @"error": [NSString stringWithFormat:
+                    @"列表「%@」有 %lu 个同名分区「%@」，无法确定删除哪个；用 delete-section --section-id 指定其一（候选 id：%@）",
+                    [list valueForKey:@"name"] ?: @"", (unsigned long)matches.count, name,
+                    [candidateIDs componentsJoinedByString: @", "]],
+                 @"candidates": candidates};
+    }
 
-    id oid = [section valueForKey:@"objectID"];
+    id section = matches.firstObject;
+    NSArray *matchedNames = parseSectionNames(section);
+    NSString *deletedName = matchedNames.count > 0 ? matchedNames[0] : (name ?: @"");
+    NSString *deletedID = extractUUID([section valueForKey:@"objectID"]) ?: @"";
     // 用 REMSaveRequest.updateListSection: 拿被正确跟踪的 change item（手动
     // initWithObjectID:displayName:insertIntoListChangeItem: 构造的 item 是
     // “新插入”语义，removeFromList 只会撤销插入，分区不会真删）。
@@ -1416,7 +1590,7 @@ static NSDictionary *opDeleteSection(id store, NSDictionary *req) {
     ((void(*)(id, SEL))objc_msgSend)(sectionCI, NSSelectorFromString(@"removeFromList"));
 
     if (!saveRequest(saveReq, &err)) return saveError(saveReq, err);
-    return @{@"ok": @YES, @"name": name,
+    return @{@"ok": @YES, @"name": deletedName, @"id": deletedID,
              @"listID": extractUUID([list valueForKey:@"objectID"]) ?: @""};
 }
 
@@ -1575,6 +1749,20 @@ static NSDictionary *opCreateSmartList(id store, NSDictionary *req) {
     }
     NSString *displayName = req[@"displayName"];
     if (![displayName isKindOfClass:[NSString class]]) displayName = nil;
+    if (![req[@"allowDuplicate"] boolValue]) {
+        NSArray *existing = smartListsNamedIgnoringCase(store, name);
+        if (existing.count > 0) {
+            NSMutableArray *parts = [NSMutableArray array];
+            for (id sl in existing) {
+                [parts addObject:[NSString stringWithFormat:@"%@[%@]", name,
+                    extractUUID([sl valueForKey:@"objectID"]) ?: @""]];
+            }
+            return @{@"ok": @NO, @"code": @"smartListExists",
+                     @"error": [NSString stringWithFormat:
+                        @"智能列表「%@」已存在（%@）；未创建。智能列表的过滤条件创建后不能改——要不同条件请换名或删旧建新；确需同名再建一条请加 --allow-duplicate",
+                        name, [parts componentsJoinedByString:@", "]]};
+        }
+    }
     NSError *err = nil;
     id accounts = ((id(*)(id, SEL, id*))objc_msgSend)(store, NSSelectorFromString(@"fetchAccountsWithError:"), &err);
     id acct = [accounts isKindOfClass:[NSArray class]] ? accounts[0] : nil;

@@ -1,147 +1,77 @@
-# remindkit — Apple Reminders data pipeline CLI
+# remindkit — manage Apple Reminders from the terminal
 
 [![Vibe coded](https://img.shields.io/badge/vibe-coded-%23ff69b4?style=flat-square)](https://en.wikipedia.org/wiki/Vibe_coding)
 
 [中文版](README.md)
 
-remindkit is a macOS command-line tool that exports structured data from Apple Reminders and supports **the full hierarchy, read and write** — list folders → lists → sections → tasks → subtasks, all five levels. **Designed for AI agents**: unified JSON output, machine-parseable error contract, and a bundled agent skill.
+For anyone who uses Apple Reminders on a Mac: one command shows what's due, and you can add, reschedule, complete, or delete without clicking through the app.
+Your data stays in Apple Reminders — remindkit only reads and writes it from the terminal; it doesn't replace the app.
 
+> ⚠️ Reads and writes data through Apple's **private framework** `ReminderKit.framework`. Unsupported by Apple, may break with macOS updates; not affiliated with Apple Inc.; for personal use and study only.
 
-> 🤖 **Vibe coded project**: features, tests, and docs are produced in collaboration with an AI agent (vibe coding) and **have not been line-by-line reviewed — use with caution in production**.
+> 🔒 All data stays on your machine: remindkit makes no network requests and uploads nothing (bills, health, location reminders never leave your Mac).
 
-> **⚠️ Disclaimer** — reads Apple's **private framework** `ReminderKit.framework`; unsupported by Apple, may break with any macOS update; not affiliated with Apple Inc.; for personal use and study only.
-
-> **🔒 Privacy**
-> - All data is processed **locally**: the CLI makes no network requests and uploads nothing (sensitive reminder content — bills, health, locations — never leaves your machine).
-> - Requires “Reminders” access via TCC; grant it from the system prompt on first run. Permission belongs to the host process.
-
-## Full hierarchy: list folder → list → section → task → subtask
-
-All five levels of the Apple Reminders hierarchy, **readable and writable** — exactly what the public EventKit API can't do:
-
-```
-List folder (group)                    ← add-group
- └── List (calendar)                   ← add-list --group
-      ├── Section (macOS 26+)          ← add-section
-      └── Task (reminder)              ← add --list / --section
-           └── Subtask (one level only, Apple-native limit) ← add --parent <id> / update --parent <id>
-```
-
-- **Read**: `dump` / `list --groups` / `list --format json` output every level; fields map 1:1 — `isGroup` / `parentUUID` (folders), `sections`, `parentId` / `subtaskIds` (subtask tree)
-- **Write**: build top-down — `add-group` → `add-list --group` → `add-section` → `add --section` → `add --parent`; `move` re-parents between any levels; `update --parent/--no-parent` attaches an existing task as a subtask / detaches it
-
-## Features
-
-- **Structured JSON export**: lists, groups (folders), sections, subtasks, tags, flags, urgent, smart lists — including fields the public EventKit API **cannot** provide (matrix below)
-- **Full write hierarchy**: all five levels — groups, lists, sections, tasks, **subtasks** (add/update/complete/delete/move) + smart lists
-- **Dual-source architecture**: ReminderKit private framework as the primary source, EventKit public API as fallback; every export carries a `source` field
-- **Agent-first**: JSON output by default, unified error contract (stderr JSON + exit codes), `--fields` projection to save tokens, one-command skill install
-
-
-## Install
+## How to use (3 steps)
 
 ```bash
+# ① Install
 brew install hiauhong/tap/remindkit
-# First run auto-registers the agent skill (visible prompt on a terminal; REMINDKIT_NO_AUTO_SKILL=1 disables); Claude Code users add: remindkit install-skill --claude
-# or
-./Scripts/install.sh     # auto-registers the agent skill after install
+
+# ② Grant access: a system dialog appears the first time — click "Allow" (once per terminal)
+remindkit authorize --verify
+
+# ③ Start
+remindkit                                          # today / overdue / upcoming / flagged / urgent in one screen
+remindkit add "buy milk" --list Errands --due "2026-08-05 09:00"   # use your own list name
 ```
 
-## First run: grant permission + backup
+No Homebrew? Run `./Scripts/install.sh` from the repo (installs to `~/.local/bin`, no sudo). Upgrade with `brew upgrade remindkit`.
 
-```bash
-remindkit doctor                        # ① check permission (first run pops the authorization dialog — click "Allow")
-remindkit dump > ~/reminders-backup.json   # ② take a full baseline backup first
-```
+## What it does
 
-> Permission belongs to the host process (terminal / agent host); before any write operations (complete/delete/move/bulk), you can dump again and diff against the baseline for peace of mind.
+- **See**: `remindkit` gives you today, overdue, upcoming, flagged, and urgent at a glance; `today` / `overdue` / `scheduled` / `flagged` / `urgent` for a closer look.
+- **Find and count**: `search` across titles, notes, and tags; `count --by-list` for per-list stats in one call.
+- **Change**: add, reschedule, set priority, tag, add alarms, repeat, complete, move, delete, and bulk operations.
+- **Structure**: list folder → list → section → task → subtask — all five levels can be created, edited, and moved.
+- **Export**: `remindkit dump` prints full JSON, for backups or feeding other tools.
 
-## Quick start
+## Common commands
 
-```bash
-remindkit                # overview: today / overdue / upcoming / flagged / urgent
-remindkit today          # due today
-remindkit overdue        # overdue
-remindkit search "milk"  # search
-remindkit add "buy milk" --list 待办 --due "2026-08-03 09:00"
-remindkit complete <id>  # complete
-```
+| I want to… | Command |
+|---|---|
+| See what's due | `remindkit` |
+| Due today / overdue | `remindkit today` / `remindkit overdue` |
+| Search titles, notes, tags | `remindkit search "milk"` |
+| Look inside one list | `remindkit query --list Work` |
+| Count, by list | `remindkit count --by-list` |
+| Add / complete | `remindkit add "Write report" --list Work --due "2026-08-05 10:00"` / `remindkit complete <id>` |
+| Full export / backup | `remindkit dump > ~/reminders-backup.json` |
+| Permission trouble | `remindkit doctor` |
+| All commands | `remindkit --help` |
 
-## For AI agents
+> `<id>` comes from any query result. Deletes are soft: they go to Recently Deleted and the system purges them after 30 days.
 
-- Query commands return **incomplete only** by default; `--all` / `--completed` toggle
-- JSON output by default; **runtime business errors** to stderr as JSON `{"error":{...}}` + exit codes (1 runtime / 64 usage); **usage/parse errors are plain text + usage (not JSON)** — agents should distinguish by exit code, not assume every error is `jq`-parseable
-- Full write hierarchy: list folders → lists → sections → tasks → subtasks; incl. tags / flag / urgent / smart lists / batch
-- Bundled skill: register manually with `remindkit install-skill` (**brew does not auto-register**); agents scan `~/.agents/skills/` and auto-discover
-- Full options: `remindkit <command> --help`; agent details in [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md)
-- Support matrix (✅ full / 🟡 limited / ❌ not supported — e.g. grocery lists, templates, image attachments): [docs/apple-reminders-support.en.md](docs/apple-reminders-support.en.md)
+## Known limitations
 
-## Safety
+- **Requirements**: macOS 14 or later; sections inside a list need macOS 26 or later.
+- **Permission**: needs "Reminders" access. The permission belongs to the **app that runs it** (your terminal, or the AI tool's host), not to remindkit itself — switching apps means granting again. Full Disk Access is **not** needed.
+- **First grant is manual**: plain queries never pop the dialog; without permission they quietly return empty data, which looks like "no reminders". Running `remindkit authorize --verify` is what triggers it.
+- **Sandboxed / restricted AI tools** may report `Mach error 4099`: switch the tool to "Full Access" execution mode, then authorize. This is not the same as macOS Full Disk Access. If the tool has no such mode, authorize from a terminal that can show the dialog.
+- **iCloud**: remindkit does not use the network or trigger sync; it reads the Mac's local data (changes not yet synced down won't appear). Shared / collaborative lists are not supported.
+- **Not supported**: image attachments, templates, "remind me when I message someone", grocery-list category grouping, writing time zones; subtasks are one level only (Apple's own limit).
+- **Recently Deleted / restore** only covers items remindkit deleted; items deleted in the Reminders app are invisible to it.
+- Back up before writing: `remindkit dump > ~/reminders-backup.json`.
 
-| Capability | Field | Notes |
-|---|---|---|
-| Tags | `reminders[].tags` | not exposed by EventKit |
-| Sections | `reminders[].section` / `calendars[].sections` | macOS 26+ |
-| Subtasks | `reminders[].parentId` / `.subtaskIds` | tree structure |
-| Flagged / Urgent | `flagged` / `urgent` | |
-| Icons / Colors | `calendars[].icon` / `.color` | list emoji + hex |
-| Groups | `calendars[].isGroup` / `.parentUUID` | folder structure |
-| Smart lists | `smartLists[]` | system (today/flagged/completed/assigned) + custom; system views excluded by default |
-| Early/location alarms | `reminders[].alarms` | date/interval/dueDateDelta/location |
-| Global ordering | `listIDsOrdering` | sidebar order |
+## For developers
 
-## Write operations
-
-```bash
-# Tasks: add/update/complete/delete/move (ReminderKit write primary, EventKit fallback)
-remindkit add "buy milk" --list 日常 --due "2026-08-03 09:00" --priority high \
-  --repeat weekly --days mon,wed --tag 购物 --urgent --flagged \
-  --notes "note" --url "https://…" --alarm-before 30
-remindkit update <id> --title "new title" --due "2026-08-15 15:30" --priority medium --tag 生活
-remindkit complete <id>          # recurring reminders roll to the next occurrence; response includes nextOccurrence
-remindkit delete <id>            # soft delete → Recently Deleted (system purges after 30 days)
-remindkit move <id> --to 日常
-
-# Hierarchy: list folder → list → section → task → subtask
-remindkit add-group "工作"                              # ① folder (group)
-remindkit add-list "项目A" --group "工作"                # ② list
-remindkit add-section "项目A" "待办"                     # ③ section
-remindkit add "写周报" --list "项目A" --section "待办"    # ④ task
-remindkit add "整理大纲" --list "项目A" --parent <写周报的ID>   # ⑤ subtask (nests further)
-
-# Bulk
-remindkit bulk --op complete --list 日常 --due-before 2026-08-02   # preview with --dry-run first
-```
-
-> **Safety**: lists with duplicate names (e.g. two 「数码」「财务」) must be addressed by ID; `delete-list` requires `--yes` (permanent); test writes only on 「测试冒烟*」 lists (create & clean up, zero leftovers).
-
-## Output format
-
-Unified JSON schema (`dump` full export):
-
-```json
-{
-  "version": 1,
-  "source": "reminderKit",        // reminderKit | eventKit
-  "calendars": [{ "id": "…", "title": "工作", "isGroup": false, "icon": "💼",
-                  "color": "#007aff", "sections": ["重要"], "parentUUID": null, "order": 0 }],
-  "reminders": [{ "id": "…", "calendarId": "…", "title": "买牛奶", "completed": false,
-                  "priority": 0, "dueDate": 1785859200, "dueDateText": "2026-08-05 00:00",
-                  "tags": ["购物"], "flagged": true, "urgent": false,
-                  "section": "待办", "parentId": null, "subtaskIds": [] }],
-  "smartLists": [{ "uuid": "…", "name": "想买", "type": "custom", "filterData": "…" }],
-  "listIDsOrdering": ["uuid1", "uuid2"]
-}
-```
-
-
-## Development
-
-```bash
-make build    # build all (ObjC subprocess + Swift CLI)
-make test     # smoke test + skill contract test
-```
+- **Two data sources**: ReminderKit private framework is primary (richest fields), EventKit public API is the fallback; `dump`'s `source` says which one served the data, and degraded responses carry `degraded: true`.
+- **Output**: plain text on a terminal, JSON automatically when piped / called by an agent; use `--fields id,title,dueDate` to save tokens.
+- **Error contract**: runtime errors → stderr JSON + exit code 1; usage errors → plain text + exit code 64 (don't assume every error is `jq`-parseable).
+- **Support matrix** (✅ / 🟡 / ❌ per Apple feature): [docs/apple-reminders-support.en.md](docs/apple-reminders-support.en.md)
+- **Agent contract**: [.agents/skills/remindkit/SKILL.md](.agents/skills/remindkit/SKILL.md); every run syncs to `~/.agents/skills/` (`REMINDKIT_NO_AUTO_SKILL=1` disables), Claude Code users: `remindkit install-skill --claude`.
+- **Read-only mode**: `REMINDKIT_READ_ONLY=1` rejects all writes. Address duplicate list names by ID; `delete-list` is permanent and needs `--yes`.
+- **Build / test**: `make build`; `make test-regressions` day to day, `make test` before a release (the smoke suite needs local Reminders permission and only touches lists it creates, with self-cleanup).
 
 ## License
 
-MIT (with a private-framework disclaimer, see [LICENSE](LICENSE))
+MIT (with a private-framework disclaimer, see [LICENSE](LICENSE)).
