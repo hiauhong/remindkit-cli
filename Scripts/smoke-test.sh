@@ -793,6 +793,80 @@ check "delete-section without name or --section-id is a usage error" "ok" "$({ "
 check "delete-section --section-id on unknown id reports noSuchSection" "ok" "$({ "$BIN" delete-section "$IDS_LIST_ID" --section-id 00000000-0000-0000-0000-000000000000 2>&1 || true; } | python3 -c "
 import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='noSuchSection' else 'bad')")"
 
+# ── update-section：分区改名（保留分区 id 与条目归属）──────────────────────
+# 此前改名只能删+建：delete-section 会把条目挤到无分区区，再逐条 update --section
+# 归位。覆盖：按名改名 / section id 不变 / 条目归属不变 / 目标名被占 sectionExists /
+# 同名不变 unchanged / --allow-duplicate / 同名歧义 / --section-id 精确改名 /
+# 未知分区 / 缺参数；以及智能列表分区改名（读 schema 不渲染智能分区，靠回读
+# previousName 断言持久化）。
+US_LIST="测试冒烟分区改名$TAG"
+US_LIST_ID=$("$BIN" add-list "$US_LIST" | python3 -c "import json,sys; print(json.load(sys.stdin)['calendar']['id'])")
+register_entity_id "$US_LIST_ID"
+"$BIN" add-section "$US_LIST_ID" 冒烟甲 >/dev/null 2>&1
+"$BIN" add-section "$US_LIST_ID" 冒烟乙 >/dev/null 2>&1
+US_SEC_BEFORE=$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$US_LIST_ID':
+        for d in (c.get('sectionDetails') or []):
+            if d['name']=='冒烟甲': print(d['id'])
+")
+US_REM=$("$BIN" add "冒烟改名任务$TAG" --list-id "$US_LIST_ID" --section 冒烟甲 | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+check "update-section renames a section (changed + previousName)" "ok" "$("$BIN" update-section "$US_LIST_ID" 冒烟甲 --new-name 冒烟丙 | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('changed') and d.get('name')=='冒烟丙' and d.get('previousName')=='冒烟甲' else 'bad:'+json.dumps(d,ensure_ascii=False))")"
+check "update-section keeps section order and id" "ok" "$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$US_LIST_ID':
+        det=c.get('sectionDetails') or []
+        ids={d['name']: d['id'] for d in det}
+        print('ok' if [d['name'] for d in det]==['冒烟丙','冒烟乙'] and ids.get('冒烟丙')=='$US_SEC_BEFORE' else 'bad:'+json.dumps(det,ensure_ascii=False))
+")"
+check "update-section keeps reminder membership" "冒烟丙" "$("$BIN" query --list-id "$US_LIST_ID" --fields id,title,section | python3 -c "
+import json,sys
+rs=[r for r in json.load(sys.stdin) if r['id']=='$US_REM']
+print(rs[0].get('section') if rs else 'missing')")"
+check "update-section refuses a sibling's existing name" "ok" "$({ "$BIN" update-section "$US_LIST_ID" 冒烟乙 --new-name 冒烟丙 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='sectionExists' else 'bad')")"
+check "update-section to the current name is a no-op" "ok" "$("$BIN" update-section "$US_LIST_ID" 冒烟乙 --new-name 冒烟乙 | python3 -c "
+import json,sys; d=json.load(sys.stdin); print('ok' if d.get('unchanged') and not d.get('changed') else 'bad:'+json.dumps(d,ensure_ascii=False))")"
+"$BIN" update-section "$US_LIST_ID" 冒烟乙 --new-name 冒烟丙 --allow-duplicate >/dev/null 2>&1
+check "--allow-duplicate can create a duplicate section name" "2" "$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$US_LIST_ID':
+        print(len([d for d in (c.get('sectionDetails') or []) if d['name']=='冒烟丙']))
+")"
+check "update-section by duplicate name reports ambiguousSection" "ok" "$({ "$BIN" update-section "$US_LIST_ID" 冒烟丙 --new-name 冒烟戊 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='ambiguousSection' else 'bad')")"
+US_IDS=$("$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$US_LIST_ID': print(' '.join(d['id'] for d in (c.get('sectionDetails') or []) if d['name']=='冒烟丙'))
+")
+read -r US_ID_A US_ID_B <<<"$US_IDS"
+check "update-section --section-id renames only the targeted duplicate" "ok" "$("$BIN" update-section "$US_LIST_ID" --section-id "$US_ID_B" --new-name 冒烟戊 >/dev/null 2>&1; "$BIN" list --format json | python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    if c['id']=='$US_LIST_ID':
+        det=c.get('sectionDetails') or []
+        print('ok' if [d['name'] for d in det]==['冒烟丙','冒烟戊'] and det[0]['id']=='$US_ID_A' else 'bad:'+json.dumps(det,ensure_ascii=False))
+")"
+check "update-section unknown section reports noSuchSection" "ok" "$({ "$BIN" update-section "$US_LIST_ID" 不存在 --new-name 冒烟丁 2>&1 || true; } | python3 -c "
+import json,sys; print('ok' if json.load(sys.stdin).get('error',{}).get('code')=='noSuchSection' else 'bad')")"
+check "update-section without name or --section-id is a usage error" "ok" "$({ "$BIN" update-section "$US_LIST_ID" --new-name 冒烟丁 2>&1 || true; } | grep -q '需要分区名' && echo ok || echo bad)"
+
+US_SL="测试冒烟分区改名智能$TAG"
+US_SL_ID=$("$BIN" add-smartlist "$US_SL" --tag "冒烟改名$TAG" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+register_entity_id "$US_SL_ID"
+"$BIN" add-section "$US_SL_ID" 冒烟甲 --smart-list >/dev/null 2>&1
+check "update-section --smart-list renames a smart list section" "ok" "$("$BIN" update-section "$US_SL_ID" 冒烟甲 --new-name 冒烟丙 --smart-list | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('ok' if d.get('ok') and d.get('changed') and d.get('smartListID')=='$US_SL_ID' else 'bad:'+json.dumps(d,ensure_ascii=False))")"
+check "update-section --smart-list rename persists" "ok" "$("$BIN" update-section "$US_SL_ID" 冒烟丙 --new-name 冒烟甲 --smart-list | python3 -c "
+import json,sys; d=json.load(sys.stdin); print('ok' if d.get('changed') and d.get('previousName')=='冒烟丙' else 'bad:'+json.dumps(d,ensure_ascii=False))")"
+
 # ── 创建查重：add-list / add-group / add-smartlist 默认拒绝同名 ──────────────
 # 同名实体会让名字寻址失效（读侧合并 + 警告、写侧强制 --list-id），而 Apple 允许
 # 同名。因此创建默认失败并回显既有 id，要建重复须显式 --allow-duplicate。

@@ -1526,6 +1526,62 @@ struct ReorderSection: ParsableCommand {
     }
 }
 
+// MARK: - update-section
+
+struct UpdateSection: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update-section",
+        abstract: "Rename a section in a list or smart list (keeps the section id and its reminders' membership)"
+    )
+
+    @Argument(help: "List name or ID")
+    var list: String
+
+    @Argument(help: "Current section name (omit when using --section-id)")
+    var name: String?
+
+    @Option(name: .long, help: "New section name")
+    var newName: String
+
+    @Option(name: .long, help: "List ID (preferred; disambiguates same-named lists)")
+    var listId: String?
+
+    @Option(name: .long, help: "Section ID — the precise selector, required when two sections share a name (ids come from list --format json → sectionDetails)")
+    var sectionId: String?
+
+    @Flag(name: .long, help: "Target is a smart list (virtual view) instead of a regular list")
+    var smartList: Bool = false
+
+    @Flag(name: .long, help: "Allow renaming onto a name another section already uses (default: fail with sectionExists — two identical names make name addressing ambiguous)")
+    var allowDuplicate: Bool = false
+
+    func validate() throws {
+        guard (name?.isEmpty == false) || sectionId != nil else {
+            throw ValidationError("需要分区名，或用 --section-id 指定分区 id")
+        }
+        guard !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ValidationError("--new-name 不能为空")
+        }
+    }
+
+    func run() throws {
+        guardWriteEnabled()
+        var request: [String: Any] = ["op": "renameSection", "newName": newName, "author": "remindkit"]
+        if smartList { request["smartList"] = true }
+        if allowDuplicate { request["allowDuplicate"] = true }
+        if let name, !name.isEmpty { request["name"] = name }
+        if let sectionId { request["sectionID"] = sectionId }
+        if let listId { request["listID"] = listId } else { request["listName"] = list }
+
+        let (source, result) = try writeWithReminderKit(request) {
+            fail("unsupportedByEventKit", "EventKit 不支持分区（需要 ReminderKit 子进程）")
+        }
+        var out: [String: Any] = ["ok": true, "source": source]
+        for (k, v) in result where k != "ok" { out[k] = v }
+        try jsonOut(out)
+    }
+}
+
 // MARK: - add-smartlist
 
 struct AddSmartList: ParsableCommand {

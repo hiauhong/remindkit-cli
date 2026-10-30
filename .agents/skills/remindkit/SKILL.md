@@ -58,6 +58,7 @@ allowed-tools:
 | 全量导出 | `remindkit dump > reminders.json` | 数据量大，谨慎；`dump.smartLists` 默认只含自定义（`type: custom`）；系统智能列表（今天/旗标/已完成/已分配）是虚拟视图、事项都在普通列表里，默认不输出，`dump --system-smartlists` 才包含；「计划」无实体，用 `scheduled` 命令 |
 | 调整列表内任务顺序 | `remindkit reorder <id> --before <同级ID>` / `--after` / `--first`（置顶） / `--last`（置底） | 相对移动，锚点须在同一列表；子任务不支持（v1） |
 | 调整列表内**分区**顺序 | `remindkit reorder-section <列表> <分区> --first` / `--last` / `--before <分区>` / `--after <分区>` | 分区顺序独立于任务顺序；`--smart-list` 用于智能列表分区；锚点须在同一列表 |
+| **分区改名** | `remindkit update-section <列表> <分区> --new-name <新名>` | 保留分区 id 与条目归属（不用删+建）；同名多份用 `--section-id`；目标名已被同列表占用默认拒绝（`sectionExists`），`--allow-duplicate` 放开；智能列表加 `--smart-list` |
 | 权限诊断 | `remindkit doctor --for-agent --json` | 报错时最先跑 |
 
 ## 数据结构：五层层级模型（先建心智模型，再动手）
@@ -111,7 +112,7 @@ Apple Reminders 是严格的层级结构。**分组/分区/备注是用户精心
 ## 错误与权限
 
 - 运行时错误（如权限被拒、找不到列表/提醒）输出到 **stderr** 的 JSON：`{"error":{"code":"…","message":"…"}}`，退出码 1；**用法错误（缺参数/互斥/格式错）是普通文本 + usage，退出码 64（非 JSON）**——agent 按退出码区分，别假设 stderr 永远可 `jq` 解析。**读侧与写侧同契约**。
-- **列表不存在**：`--list`/`--list-id`/`--to-id`/`--group-id` 匹配不到时退出码 1，stderr：`{"error":{"code":"noSuchList","message":"…"}}`（有近似候选时 message 附带 Did you mean 提示）。写侧业务码：noSuchList / noSuchReminder / noSuchGroup / noSuchAccount / noSuchDeletedRecord / noSuchSection / **ambiguousSection**（同名分区：Apple 允许同一列表里两个分区重名，按名字操作会落在哪一个不确定，必须改用 `--section-id`）/ **listExists / groupExists / smartListExists**（创建查重：同名实体已存在则拒绝创建并回显既有 id，要建重复须 `--allow-duplicate`）/ invalidArgument / reminderKitError / unsupportedByEventKit / readOnly。
+- **列表不存在**：`--list`/`--list-id`/`--to-id`/`--group-id` 匹配不到时退出码 1，stderr：`{"error":{"code":"noSuchList","message":"…"}}`（有近似候选时 message 附带 Did you mean 提示）。写侧业务码：noSuchList / noSuchReminder / noSuchGroup / noSuchAccount / noSuchDeletedRecord / noSuchSection / **ambiguousSection**（同名分区：Apple 允许同一列表里两个分区重名，按名字操作会落在哪一个不确定，必须改用 `--section-id`）/ **sectionExists**（分区改名到已被同列表占用的名字：默认拒绝，`--allow-duplicate` 放开）/ **listExists / groupExists / smartListExists**（创建查重：同名实体已存在则拒绝创建并回显既有 id，要建重复须 `--allow-duplicate`）/ invalidArgument / reminderKitError / unsupportedByEventKit / readOnly。
 - macOS 权限归属于**宿主进程**（终端 App 或 agent 宿主），不是 remindkit 二进制。
 - **新宿主首次使用（access: notDetermined）**：默认数据路径（ReminderKit 子进程）**从不触发授权弹窗**，未授权时静默返回空数据——普通查询命令永远不会弹窗。必须显式 `remindkit authorize`（或 `doctor --authorize`）调用 EventKit 授权路径触发系统弹窗；agent 用 `remindkit authorize --check --json` 非交互查状态，`--verify` 授权后验证主路径可读。
 - **受沙盒 agent 宿主**：若状态仍是 `notDetermined`，但显式 `authorize` 返回 `Mach error 4099`，说明 EventKit 的 XPC 连接在抵达 TCC 前已被执行沙盒阻断；这不是用户拒绝，**不要**重置 TCC。将 agent 切换为「完全访问」（Full Access）执行模式后，于同一会话运行 `remindkit authorize --verify`；这里的「完全访问」不是 macOS「完全磁盘访问」。若该 agent 无此模式，则改在可访问 macOS GUI/TCC 的非沙盒宿主会话中授权。Terminal 的授权仅归 Terminal，不能替代 agent 宿主的授权。
@@ -160,7 +161,7 @@ remindkit note --list 焦点 --set "重要事项"         # 智能列表也可�
 remindkit note --list <UUID前缀> --set "..."      # 智能列表 UUID 前缀
 # 智能列表：系统（今天/旗标/已完成/已分配）+ 自定义均可读可写；note --all 输出带 isSmartList/smartListType 标识
 # 存储：~/.local/share/remindkit/notes.json（可用 REMINDKIT_NOTES_FILE 改路径，如放 iCloud Drive 自动同步）
-# list --format json 输出携带 id/title/icon/color/sections/sectionDetails/parentTitle/note/order（一次拿全结构）；sectionDetails = [{id,name}] 是分区的稳定 id（与 sections 同序），同名列存在时只能靠它精确定位（delete-section --section-id）；--smart-lists 时输出 {lists, smartLists} 容器（智能列表含 filterData）
+# list --format json 输出携带 id/title/icon/color/sections/sectionDetails/parentTitle/note/order（一次拿全结构）；sectionDetails = [{id,name}] 是分区的稳定 id（与 sections 同序），同名列存在时只能靠它精确定位（delete-section / update-section 的 --section-id）；--smart-lists 时输出 {lists, smartLists} 容器（智能列表含 filterData）
 # list --format plain（树形）和 count --by-list 的输出也会自动携带每个列表的 note 字段
 
 # 列表用途标注（agent 非交互流程，不跑 setup）
@@ -191,7 +192,7 @@ remindkit doctor --authorize           # doctor 第二入口，同 authorize
 
 ## 写操作（谨慎使用）
 
-> **只读保护**：环境变量 `REMINDKIT_READ_ONLY=1` 时所有写命令（add/update/complete/delete/move/reorder/reorder-section/bulk/add-list/add-group/add-section/delete-section/add-smartlist/delete-list/update-list/restore）拒绝执行，报 `{"error":{"code":"readOnly"}}`——agent 在只读场景（如纯查询会话）可设置它防误写。
+> **只读保护**：环境变量 `REMINDKIT_READ_ONLY=1` 时所有写命令（add/update/complete/delete/move/reorder/reorder-section/update-section/bulk/add-list/add-group/add-section/delete-section/add-smartlist/delete-list/update-list/restore）拒绝执行，报 `{"error":{"code":"readOnly"}}`——agent 在只读场景（如纯查询会话）可设置它防误写。
 > **测试纪律（硬规则）**：写操作测试只能在**新建**的「测试冒烟*」列表/分组上做，自建自删（`make test` 的冒烟脚本会自建并自动删除，最后校验零残留）。**绝不直接对真实列表执行写测试**。
 > **同名列表**：按名字操作遇到重名（如两个「工作」）会报歧义错误并列出候选 ID——此时必须改用 `--id`/`--list-id`/`--to-id` 精确定位。
 
@@ -279,6 +280,9 @@ remindkit add-section "项目A" "待办"            # 给列表加分区（**幂
 remindkit add-section "项目A" "待办" --allow-duplicate   # 确实要两个同名分区时才用（默认幂等）
 remindkit delete-section "项目A" "待办"               # 按名字删分区；同名多份时报 ambiguousSection（不猜）
 remindkit delete-section "项目A" --section-id 36792432-AF54-4101-B76B-5BFF13AA0B70   # 按 id 精确删（推荐；id 取自 list --format json 的 sectionDetails）
+remindkit update-section "项目A" "待办" --new-name "进行中"    # 分区改名：分区 id 与条目的分区归属都不变（不需要删+建）
+remindkit update-section "项目A" --section-id 36792432-AF54-4101-B76B-5BFF13AA0B70 --new-name "已完成"  # 同名多份时按 id 精确改
+remindkit update-section "项目A" "待办" --new-name "进行中" --allow-duplicate  # 目标名已被同列表另一分区占用时默认拒绝；确认要重名才加此旗标
 remindkit add "写周报" --list "项目A" --section "待办"   # 新建提醒时直接归入分区
 remindkit update <id> --section "进行中"         # 把已有提醒移入另一分区（先 add-section 创建）
 remindkit reorder-section "项目A" "进行中" --first   # 调整分区显示顺序（--before/--after/--last）
@@ -286,6 +290,7 @@ remindkit reorder-section "项目A" "进行中" --first   # 调整分区显示�
 # 智能列表（虚拟视图，任务必须物理存在于普通列表；2026-08-16）
 remindkit add-smartlist "日用品" --tag 日用品采购 --color "#FF3B30" --group 收入支出  # 建智能列表 + hashtag 过滤 + 放入分组（--group 按名/UUID）
 remindkit add-section "日用品" "厨卫" --smart-list                    # 给智能列表加分区（--smart-list 标记）
+remindkit update-section "日用品" "厨卫" --new-name "家电" --smart-list  # 智能列表分区改名（保留分区 id 与归属）
 remindkit add "洗衣液" --list 日用品 --section "厨卫" --smart-list "日用品"  # 新建任务时归入智能列表分区（物理仍在该普通列表）
 remindkit update <id> --section "家电" --smart-list "日用品"          # 把已有任务归入智能列表分区
 remindkit query --smart-list "日用品" --fields id,title,listTitle    # 求值智能列表：返回匹配其过滤条件的任务（当前支持 hashtags）

@@ -17,7 +17,7 @@
 | Group (smart folder) | ✅ | **Read** fully (`list --groups`, parentUUID ownership); **write**: `add-group` creates, `add-list --group` files into, `update-list` renames (unified dispatch), `delete-list` removes (verified: group = REMAccountGroupContext, no REMGroup class; Apple folders don't nest — single level) |
 | Smart list | ✅ | **Read** (smartLists field); **write**: `add-smartlist [--color]`, `update-list` renames, deletion via `delete-list` |
 | Grocery list | ❌ | Apple's "Grocery" list type (auto-categorizes items: produce / dairy / baked goods, etc.) relies on ReminderKit category fields — **categories are not readable and the list type can't be created**; it can only be read as a plain list (titles/items visible, no category grouping) |
-| Sections | ✅ | **Read** (`[N sections]`); **write**: `add-section <list> <name>` creates; `add --section` / `update --section` file reminders into a section (REMMembership path) |
+| Sections | ✅ | **Read** (`[N sections]`); **write**: `add-section <list> <name>` creates; `update-section <list> [<name>] --new-name <new>` renames in place (keeps the section id and its reminders' membership; `--section-id` for duplicate names, `--smart-list` for smart lists; renaming onto a taken name fails with `sectionExists` unless `--allow-duplicate`); `add --section` / `update --section` file reminders into a section (REMMembership path) |
 | List ordering | 🟡 | Display order preserved on read; **write ordering not supported** |
 
 ## 2. Reminder field layer
@@ -99,4 +99,4 @@
 
 **Read side ≈ 100%**: nearly every Apple Reminders field is readable (incl. subtasks, location, recurrence, time zone, smart lists).
 
-**Write side covers the full hierarchy**: folder (`add-group`) → list (`add-list [--group]`) → section (`add-section` + `add/update --section`) → task (`add`/`update`/`complete`) → subtask (`add --parent`) — all wired up; everyday use (CRUD, complete, move, batch, tags, flag, urgent, alarms, location, recurrence, smart-list creation) is complete; gaps concentrate in low-frequency / system-level features (images, templates, collaboration) plus two engineering limits (Recently Deleted, move IDs).
+**Write side covers the full hierarchy**: folder (`add-group`) → list (`add-list [--group]`) → section (`add-section` + `add/update --section` + `update-section` rename) → task (`add`/`update`/`complete`) → subtask (`add --parent`) — all wired up; everyday use (CRUD, complete, move, batch, tags, flag, urgent, alarms, location, recurrence, smart-list creation) is complete; gaps concentrate in low-frequency / system-level features (images, templates, collaboration) plus two engineering limits (Recently Deleted, move IDs).
